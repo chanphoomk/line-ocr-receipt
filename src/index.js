@@ -112,6 +112,9 @@ async function handleEvent(event) {
             return;
         }
 
+        // Check if verbose mode is enabled
+        const isVerbose = process.env.VERBOSE === 'true';
+
         // Step 1: Send processing notification
         await lineService.replyText(
             event.replyToken,
@@ -123,10 +126,16 @@ async function handleEvent(event) {
         const userInfo = await lineService.getUserProfile(userId);
 
         // Step 2: Download image from LINE
+        if (isVerbose) {
+            await lineService.pushText(userId, '📥 Step 1/4: Downloading image...');
+        }
         logger.info(`Downloading image: ${messageId}`);
         const imageBuffer = await lineService.downloadImage(messageId);
 
         // Step 3: Process with Document AI
+        if (isVerbose) {
+            await lineService.pushText(userId, '🔍 Step 2/4: Processing with OCR...');
+        }
         logger.info('Processing with OCR...');
         const ocrData = await ocrService.processReceipt(imageBuffer, 'image/jpeg');
 
@@ -134,6 +143,9 @@ async function handleEvent(event) {
         await usageService.incrementUsage();
 
         // Step 4: Upload to Google Drive
+        if (isVerbose) {
+            await lineService.pushText(userId, '📁 Step 3/4: Uploading to Google Drive...');
+        }
         logger.info('Uploading to Google Drive...');
         const fileName = `receipt_${messageId}_${Date.now()}.jpg`;
         const uploadResult = await driveService.uploadImage(
@@ -143,11 +155,14 @@ async function handleEvent(event) {
         );
 
         // Step 5: Append to Google Sheets (multi-row format with user info)
+        if (isVerbose) {
+            await lineService.pushText(userId, '📊 Step 4/4: Saving to Google Sheets...');
+        }
         logger.info('Saving to Google Sheets...');
         const rows = ocrService.formatForSheets(ocrData, uploadResult.url, timestamp, userInfo);
         await sheetsService.appendRows(rows);
 
-        // Step 6: Send success message to user
+        // Step 6: Send success message with extracted data
         const successMessage = formatSuccessMessage(ocrData, uploadResult.url);
         await lineService.pushText(userId, successMessage);
 
@@ -171,13 +186,14 @@ async function handleEvent(event) {
         try {
             await lineService.pushText(
                 userId,
-                `❌ Sorry, I couldn't process your receipt. Error: ${error.message}\n\nPlease try again with a clearer image.`
+                `❌ Sorry, I couldn't process your receipt.\n\nError: ${error.message}\n\nPlease try again with a clearer image.`
             );
         } catch (notifyError) {
             logger.error('Failed to notify user of error', notifyError);
         }
     }
 }
+
 
 /**
  * Format success message for user
@@ -188,26 +204,59 @@ async function handleEvent(event) {
 function formatSuccessMessage(ocrData, imageUrl) {
     const lines = ['✅ ใบกำกับภาษีถูกบันทึกแล้ว!', ''];
 
+    // Invoice header info
     if (ocrData.invoiceNumber) {
         lines.push(`🔢 เลขที่: ${ocrData.invoiceNumber}`);
     }
     if (ocrData.invoiceDate) {
         lines.push(`📅 วันที่: ${ocrData.invoiceDate}`);
     }
+    
+    // Seller info
     if (ocrData.sellerName) {
         lines.push(`🏪 ผู้ขาย: ${ocrData.sellerName}`);
     }
     if (ocrData.sellerTaxId) {
         lines.push(`🏷️ Tax ID: ${ocrData.sellerTaxId}`);
     }
-    if (ocrData.grandTotal) {
-        lines.push(`💰 ยอดรวม: ${ocrData.grandTotal}`);
+    if (ocrData.sellerBranch) {
+        lines.push(`📍 สาขา: ${ocrData.sellerBranch}`);
+    }
+
+    // Buyer info (if exists)
+    if (ocrData.buyerName) {
+        lines.push('');
+        lines.push(`👤 ผู้ซื้อ: ${ocrData.buyerName}`);
+        if (ocrData.buyerTaxId) {
+            lines.push(`🏷️ Tax ID ผู้ซื้อ: ${ocrData.buyerTaxId}`);
+        }
+    }
+
+    // Line items
+    if (ocrData.lineItems && ocrData.lineItems.length > 0) {
+        lines.push('');
+        lines.push('📝 รายการ:');
+        for (const item of ocrData.lineItems.slice(0, 5)) { // Show max 5 items
+            let itemLine = `  • ${item.description || 'Item'}`;
+            if (item.quantity) itemLine += ` x${item.quantity}`;
+            if (item.amount) itemLine += ` = ${item.amount}`;
+            lines.push(itemLine);
+        }
+        if (ocrData.lineItems.length > 5) {
+            lines.push(`  ... และอีก ${ocrData.lineItems.length - 5} รายการ`);
+        }
+    }
+
+    // Totals
+    lines.push('');
+    if (ocrData.subtotal) {
+        lines.push(`💵 ยอดก่อน VAT: ${ocrData.subtotal}`);
     }
     if (ocrData.vatAmount) {
         lines.push(`📊 VAT 7%: ${ocrData.vatAmount}`);
     }
-    if (ocrData.lineItems && ocrData.lineItems.length > 0) {
-        lines.push(`📝 รายการ: ${ocrData.lineItems.length} items`);
+    if (ocrData.grandTotal) {
+        lines.push(`💰 ยอดรวม: ${ocrData.grandTotal}`);
     }
 
     lines.push('');
@@ -216,6 +265,7 @@ function formatSuccessMessage(ocrData, imageUrl) {
 
     return lines.join('\n');
 }
+
 
 
 /**
