@@ -23,21 +23,35 @@ function validateEnv() {
   }
 }
 
-// Parse the base64-encoded service account key
+// Cache for parsed credentials
+let cachedCredentials = null;
+
+// Parse the base64-encoded service account key (lazy loading)
 function getServiceAccountCredentials() {
+  // Return cached if already parsed
+  if (cachedCredentials) {
+    return cachedCredentials;
+  }
+
   const base64Key = process.env.GOOGLE_SERVICE_ACCOUNT_KEY;
+  
+  if (!base64Key) {
+    console.error('ERROR: GOOGLE_SERVICE_ACCOUNT_KEY is not set');
+    return null;
+  }
+  
   try {
     const jsonString = Buffer.from(base64Key, 'base64').toString('utf-8');
-    return JSON.parse(jsonString);
+    cachedCredentials = JSON.parse(jsonString);
+    return cachedCredentials;
   } catch (error) {
-    throw new Error('Invalid GOOGLE_SERVICE_ACCOUNT_KEY: Failed to decode base64 or parse JSON');
+    console.error('ERROR: Invalid GOOGLE_SERVICE_ACCOUNT_KEY - failed to decode base64 or parse JSON');
+    console.error('Key length:', base64Key?.length || 0);
+    return null;
   }
 }
 
-// Only validate in production or when explicitly requested
-if (process.env.NODE_ENV === 'production') {
-  validateEnv();
-}
+// Don't validate at module load time - let the server start first
 
 module.exports = {
   // LINE Configuration

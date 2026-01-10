@@ -15,23 +15,13 @@ const usageService = require('./services/usage');
 
 const app = express();
 
-// Health check endpoint (before LINE middleware)
-app.get('/health', async (req, res) => {
-    try {
-        const usageStats = await usageService.getUsageStats();
-        res.json({
-            status: 'ok',
-            timestamp: new Date().toISOString(),
-            env: config.server.nodeEnv,
-            usage: usageStats,
-        });
-    } catch (error) {
-        res.json({
-            status: 'ok',
-            timestamp: new Date().toISOString(),
-            env: config.server.nodeEnv,
-        });
-    }
+// Health check endpoint (before LINE middleware) - MUST be simple and fast
+app.get('/health', (req, res) => {
+    res.json({
+        status: 'ok',
+        timestamp: new Date().toISOString(),
+        env: config.server.nodeEnv,
+    });
 });
 
 // Usage stats endpoint
