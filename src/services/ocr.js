@@ -372,31 +372,62 @@ function filterValidLineItems(lineItems) {
     }
 
     const invalidPatterns = [
+        // Discounts
         /discount/i,
         /ส่วนลด/,
+        // Service charges
         /service\s*charge/i,
         /ค่าบริการ/,
+        // Promotions
         /promotion/i,
         /โปรโมชั่น/,
+        // Rounding
         /rounding/i,
         /ปัดเศษ/,
+        // Tax
         /vat/i,
         /ภาษี/,
+        // Totals
         /^sub\s*total/i,
         /^total/i,
-        /^net/i,
+        /^net\s*(paid)?/i,
+        /net\s*amount/i,
+        // Labels/headers that aren't actual items
+        /^item\s*[:：#]/i,          // "ITEM:" or "ITEM #" labels
+        /^#\d+$/,                   // Just "#1", "#2" etc
+        /^\d+\s*$/,                 // Just numbers
+        /^qty/i,                    // Quantity headers
+        /^quantity/i,
+        /^amount/i,
+        /^price/i,
+        /^unit/i,
+        /deposit/i,
+        /เงินมัดจำ/,
+        // Common Thai receipt labels
+        /รายการ/,                   // "Items" header
+        /จำนวน/,                    // "Quantity"
+        /ราคา/,                     // "Price"  
+        /รวม/,                      // "Total"
     ];
 
     return lineItems.filter(item => {
         // Must have a description
-        if (!item.description || item.description.trim().length < 2) {
+        if (!item.description || item.description.trim().length < 3) {
+            return false;
+        }
+
+        const desc = item.description.trim();
+
+        // Skip if description is mostly numbers/symbols
+        const lettersOnly = desc.replace(/[^a-zA-Zก-๙]/g, '');
+        if (lettersOnly.length < 2) {
             return false;
         }
 
         // Skip if description matches invalid patterns
-        const desc = item.description.toLowerCase();
+        const descLower = desc.toLowerCase();
         for (const pattern of invalidPatterns) {
-            if (pattern.test(desc)) {
+            if (pattern.test(desc) || pattern.test(descLower)) {
                 return false;
             }
         }
@@ -410,6 +441,7 @@ function filterValidLineItems(lineItems) {
         return true;
     });
 }
+
 
 /**
  * Format extracted data for Google Sheets
