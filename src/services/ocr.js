@@ -362,7 +362,61 @@ function extractFromRawText(data) {
 }
 
 /**
- * Format extracted data for Google Sheets (multi-row format)
+ * Filter out invalid line items (discounts, fees, empty items)
+ * @param {Array} lineItems - Raw line items from OCR
+ * @returns {Array} Filtered valid line items
+ */
+function filterValidLineItems(lineItems) {
+    if (!lineItems || !Array.isArray(lineItems)) {
+        return [];
+    }
+
+    const invalidPatterns = [
+        /discount/i,
+        /ส่วนลด/,
+        /service\s*charge/i,
+        /ค่าบริการ/,
+        /promotion/i,
+        /โปรโมชั่น/,
+        /rounding/i,
+        /ปัดเศษ/,
+        /vat/i,
+        /ภาษี/,
+        /^sub\s*total/i,
+        /^total/i,
+        /^net/i,
+    ];
+
+    return lineItems.filter(item => {
+        // Must have a description
+        if (!item.description || item.description.trim().length < 2) {
+            return false;
+        }
+
+        // Skip if description matches invalid patterns
+        const desc = item.description.toLowerCase();
+        for (const pattern of invalidPatterns) {
+            if (pattern.test(desc)) {
+                return false;
+            }
+        }
+
+        // Skip if amount is 0, negative, or empty
+        const amount = parseFloat(String(item.amount).replace(/[^0-9.-]/g, ''));
+        if (isNaN(amount) || amount <= 0) {
+            return false;
+        }
+
+        return true;
+    });
+}
+
+/**
+ * Format extracted data for Google Sheets
+ * - 0 items: 1 row with invoice header + totals
+ * - 1 item: 1 row with invoice header + item + totals (all together)
+ * - N items: N rows, each with invoice header + one item + totals
+ * 
  * @param {Object} data - Extracted invoice data
  * @param {string} imageUrl - URL of the saved image
  * @param {string} timestamp - Processing timestamp
@@ -370,10 +424,11 @@ function extractFromRawText(data) {
  * @returns {Array<Array>} Array of rows for sheets
  */
 function formatForSheets(data, imageUrl, timestamp, userInfo = {}) {
-    const rows = [];
+    // Filter valid line items
+    const validItems = filterValidLineItems(data.lineItems);
     
-    // Common invoice data for all rows
-    const commonData = [
+    // Common invoice header data (columns A-H)
+    const headerData = [
         timestamp,                          // A: Processed At
         data.invoiceNumber || '',           // B: Invoice Number
         data.invoiceDate || '',             // C: Invoice Date
@@ -384,65 +439,60 @@ function formatForSheets(data, imageUrl, timestamp, userInfo = {}) {
         data.buyerTaxId || '',              // H: Buyer Tax ID
     ];
     
-    // Add line item rows
-    if (data.lineItems && data.lineItems.length > 0) {
-        for (const item of data.lineItems) {
-            rows.push([
-                ...commonData,
-                'ITEM',                         // I: Row Type
-                item.description || '',         // J: Item Description
-                item.quantity || '',            // K: Quantity
-                item.unitPrice || '',           // L: Unit Price
-                item.amount || '',              // M: Amount
-                '',                             // N: Subtotal (blank for items)
-                '',                             // O: VAT 7%
-                '',                             // P: Grand Total
-                '',                             // Q: Image URL (only on TOTAL row)
-                '',                             // R: Status
-                userInfo.userId || '',          // S: User ID
-                userInfo.displayName || '',     // T: User Name
-            ]);
-        }
-    }
-    
-    // Add TOTAL row
-    rows.push([
-        ...commonData,
-        'TOTAL',                            // I: Row Type
-        '',                                 // J: Item Description
-        '',                                 // K: Quantity
-        '',                                 // L: Unit Price
-        '',                                 // M: Amount
+    // Common totals data (columns N-T)
+    const totalsData = [
         data.subtotal || '',                // N: Subtotal
         data.vatAmount || '',               // O: VAT 7%
         data.grandTotal || '',              // P: Grand Total
         imageUrl || '',                     // Q: Image URL
-        '',                                 // R: Status (for manual verification)
+        '',                                 // R: Status
         userInfo.userId || '',              // S: User ID
         userInfo.displayName || '',         // T: User Name
-    ]);
+    ];
     
-    // If no line items, still return the TOTAL row
-    if (rows.length === 0) {
+    const rows = [];
+    
+    if (validItems.length === 0) {
+        // No items: 1 row with header + empty item columns + totals
         rows.push([
-            ...commonData,
-            'TOTAL',
-            '',
-            '',
-            '',
-            '',
-            data.subtotal || '',
-            data.vatAmount || '',
-            data.grandTotal || '',
-            imageUrl || '',
-            '',
-            userInfo.userId || '',
-            userInfo.displayName || '',
+            ...headerData,
+            '',                             // I: Item #
+            '',                             // J: Item Description
+            '',                             // K: Quantity
+            '',                             // L: Unit Price
+            '',                             // M: Line Amount
+            ...totalsData,
         ]);
+    } else if (validItems.length === 1) {
+        // 1 item: 1 row with everything combined
+        const item = validItems[0];
+        rows.push([
+            ...headerData,
+            '1',                            // I: Item #
+            item.description || '',         // J: Item Description
+            item.quantity || '',            // K: Quantity
+            item.unitPrice || '',           // L: Unit Price
+            item.amount || '',              // M: Line Amount
+            ...totalsData,
+        ]);
+    } else {
+        // Multiple items: N rows, each with header + item + totals
+        validItems.forEach((item, index) => {
+            rows.push([
+                ...headerData,
+                String(index + 1),          // I: Item #
+                item.description || '',     // J: Item Description
+                item.quantity || '',        // K: Quantity
+                item.unitPrice || '',       // L: Unit Price
+                item.amount || '',          // M: Line Amount
+                ...totalsData,
+            ]);
+        });
     }
     
     return rows;
 }
+
 
 /**
  * Get the header row for sheets initialization
@@ -458,14 +508,14 @@ function getSheetHeaders() {
         'Seller Branch',     // F
         'Buyer Name',        // G
         'Buyer Tax ID',      // H
-        'Row Type',          // I
+        'Item #',            // I - Item number (1, 2, 3... or blank)
         'Item Description',  // J
         'Quantity',          // K
         'Unit Price',        // L
-        'Amount',            // M
-        'Subtotal',          // N
+        'Line Amount',       // M - Amount for this line item
+        'Subtotal',          // N - Invoice subtotal
         'VAT 7%',            // O
-        'Grand Total',       // P
+        'Grand Total',       // P - Invoice total
         'Image URL',         // Q
         'Status',            // R
         'User ID',           // S - LINE User ID
