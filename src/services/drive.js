@@ -1,6 +1,10 @@
 /**
  * Google Drive Service
  * Handles file uploads and folder management
+ * 
+ * IMPORTANT: Service accounts do NOT have their own storage quota.
+ * Files must be uploaded to a Shared Drive or a folder shared with the service account.
+ * This implementation uses supportsAllDrives=true for Shared Drive compatibility.
  */
 
 const { google } = require('googleapis');
@@ -14,9 +18,12 @@ let driveClient = null;
 function getClient() {
     if (!driveClient) {
         const credentials = config.google.getCredentials();
+        if (!credentials) {
+            throw new Error('Google credentials not available');
+        }
         const auth = new google.auth.GoogleAuth({
             credentials,
-            scopes: ['https://www.googleapis.com/auth/drive.file'],
+            scopes: ['https://www.googleapis.com/auth/drive'],  // Full drive access for shared drives
         });
         driveClient = google.drive({ version: 'v3', auth });
     }
@@ -34,11 +41,13 @@ async function getOrCreateDateFolder(date = new Date()) {
     const parentFolderId = config.drive.folderId;
 
     try {
-        // Search for existing folder
+        // Search for existing folder (supports Shared Drives)
         const searchResponse = await drive.files.list({
             q: `name='${folderName}' and mimeType='application/vnd.google-apps.folder' and '${parentFolderId}' in parents and trashed=false`,
             fields: 'files(id, name)',
             spaces: 'drive',
+            supportsAllDrives: true,
+            includeItemsFromAllDrives: true,
         });
 
         if (searchResponse.data.files && searchResponse.data.files.length > 0) {
@@ -47,7 +56,7 @@ async function getOrCreateDateFolder(date = new Date()) {
             return existingFolder.id;
         }
 
-        // Create new folder
+        // Create new folder (supports Shared Drives)
         const createResponse = await drive.files.create({
             requestBody: {
                 name: folderName,
@@ -55,6 +64,7 @@ async function getOrCreateDateFolder(date = new Date()) {
                 parents: [parentFolderId],
             },
             fields: 'id',
+            supportsAllDrives: true,
         });
 
         logger.info(`Created new folder: ${folderName} (${createResponse.data.id})`);
@@ -86,7 +96,7 @@ async function uploadImage(imageBuffer, fileName, mimeType = 'image/jpeg', date 
         stream.push(imageBuffer);
         stream.push(null);
 
-        // Upload the file
+        // Upload the file (supports Shared Drives)
         const response = await drive.files.create({
             requestBody: {
                 name: fileName,
@@ -97,6 +107,7 @@ async function uploadImage(imageBuffer, fileName, mimeType = 'image/jpeg', date 
                 body: stream,
             },
             fields: 'id, name, webViewLink, webContentLink',
+            supportsAllDrives: true,
         });
 
         const fileData = response.data;
@@ -130,6 +141,7 @@ async function makePublic(fileId) {
                 role: 'reader',
                 type: 'anyone',
             },
+            supportsAllDrives: true,
         });
         logger.debug(`Made file public: ${fileId}`);
     } catch (error) {
