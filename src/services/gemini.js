@@ -131,7 +131,7 @@ function validateJsonSchema(data) {
  * Check if debug mode is enabled
  */
 function isDebugMode() {
-    return process.env.DEBUG_MODE === 'true';
+    return process.env.VERBOSE_DEBUG_MODE === 'true';
 }
 
 /**

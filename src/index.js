@@ -113,8 +113,8 @@ async function handleEvent(event) {
         }
 
         // Check verbose modes
-        const isDebugMode = process.env.DEBUG_MODE === 'true';
-        const isReturnOutput = process.env.RETURN_OUTPUT === 'true';
+        const isDebugMode = process.env.VERBOSE_DEBUG_MODE === 'true';
+        const isReturnOutput = process.env.VERBOSE_RETURN_OUTPUT === 'true';
 
         // Step 1: Send processing notification (always show quota in debug mode)
         const processingMsg = isDebugMode 
