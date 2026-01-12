@@ -153,6 +153,7 @@ async function addUser(lineUserId, userName = '') {
 
 /**
  * Get corporate configuration by name
+ * Corps tab structure: Corp Name | Sheet ID | Sheet Name | Drive Folder ID | Quota Limit | Status | Current Usage
  * @param {string} corpName - Corporation name
  * @returns {Object|null} Corp config or null if not found
  */
@@ -160,7 +161,7 @@ async function getCorpConfig(corpName) {
     try {
         const config = getConfigInfo();
         const sheets = await getSheetsApi();
-        const range = `${config.corpsTab}!A:E`;
+        const range = `${config.corpsTab}!A:G`;
         
         const response = await sheets.spreadsheets.values.get({
             spreadsheetId: config.sheetId,
@@ -177,9 +178,11 @@ async function getCorpConfig(corpName) {
                 return {
                     corpName: row[0] || '',
                     sheetId: row[1] || '',
-                    driveFolderId: row[2] || '',
-                    quotaLimit: parseInt(row[3]) || 500,
-                    status: row[4] || 'active',
+                    sheetName: row[2] || 'Sheet1',  // NEW: Sheet/tab name
+                    driveFolderId: row[3] || '',
+                    quotaLimit: parseInt(row[4]) || 500,
+                    status: row[5] || 'active',
+                    currentUsage: parseInt(row[6]) || 0,
                 };
             }
         }
@@ -246,7 +249,7 @@ function getUnauthorizedMessage() {
 
 /**
  * Get corp usage statistics
- * Corps tab structure: Corp Name | Sheet ID | Drive Folder ID | Quota Limit | Status | Current Usage
+ * Corps tab structure: Corp Name | Sheet ID | Sheet Name | Drive Folder ID | Quota Limit | Status | Current Usage
  * @param {string} corpName - Corporation name
  * @returns {Object} Usage stats for the corp
  */
@@ -258,7 +261,7 @@ async function getCorpUsageStats(corpName) {
         }
         
         const sheets = await getSheetsApi();
-        const range = `${config.corpsTab}!A:F`;
+        const range = `${config.corpsTab}!A:G`;
         
         const response = await sheets.spreadsheets.values.get({
             spreadsheetId: config.sheetId,
@@ -270,8 +273,8 @@ async function getCorpUsageStats(corpName) {
         for (let i = 1; i < rows.length; i++) {
             const row = rows[i];
             if (row[0] === corpName) {
-                const limit = parseInt(row[3]) || 500;
-                const used = parseInt(row[5]) || 0;
+                const limit = parseInt(row[4]) || 500;  // Column E
+                const used = parseInt(row[6]) || 0;     // Column G
                 const remaining = Math.max(0, limit - used);
                 const percentUsed = limit > 0 ? Math.round((used / limit) * 100) : 0;
                 
@@ -295,7 +298,7 @@ async function getCorpUsageStats(corpName) {
 }
 
 /**
- * Increment corp usage counter
+ * Increment corp usage counter (Column G)
  * @param {string} corpName - Corporation name
  */
 async function incrementCorpUsage(corpName) {
@@ -313,7 +316,7 @@ async function incrementCorpUsage(corpName) {
         
         await sheets.spreadsheets.values.update({
             spreadsheetId: config.sheetId,
-            range: `${config.corpsTab}!F${stats.rowIndex}`,
+            range: `${config.corpsTab}!G${stats.rowIndex}`,  // Column G = Current Usage
             valueInputOption: 'USER_ENTERED',
             requestBody: { values: [[newUsage]] },
         });

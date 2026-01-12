@@ -177,13 +177,13 @@ async function handleEvent(event) {
             corpConfig.driveFolderId  // Use corp-specific folder
         );
 
-        // Step 5: Append to Google Sheets (corp-specific sheet)
+        // Step 5: Append to Google Sheets (corp-specific sheet and tab)
         if (isDebugMode) {
             await lineService.pushText(userId, '📊 Step 4/4: Saving to Google Sheets...');
         }
-        logger.info(`Saving to Google Sheets (${user.corp})...`);
+        logger.info(`Saving to Google Sheets (${user.corp}/${corpConfig.sheetName})...`);
         const rows = geminiService.formatForSheets(ocrData, uploadResult.url, timestamp, userInfo);
-        await sheetsService.appendRows(rows, corpConfig.sheetId);  // Use corp-specific sheet
+        await sheetsService.appendRows(rows, corpConfig.sheetId, corpConfig.sheetName);  // Use corp-specific sheet + tab
 
         // Step 6: Send success message with extracted data (only if RETURN_OUTPUT is true)
         if (isReturnOutput) {

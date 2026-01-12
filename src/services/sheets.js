@@ -29,22 +29,24 @@ function getClient() {
  * Append a single row of data to the configured Google Sheet
  * @param {Array} rowData - Array of values to append as a row
  * @param {string} customSheetId - Optional custom spreadsheet ID (for corp routing)
+ * @param {string} customSheetName - Optional custom sheet/tab name (for corp routing)
  * @returns {Promise<Object>} Append result
  */
-async function appendRow(rowData, customSheetId = null) {
-    return appendRows([rowData], customSheetId);
+async function appendRow(rowData, customSheetId = null, customSheetName = null) {
+    return appendRows([rowData], customSheetId, customSheetName);
 }
 
 /**
  * Append multiple rows to the sheet (for multi-row invoice format)
  * @param {Array<Array>} rows - Array of row arrays
  * @param {string} customSheetId - Optional custom spreadsheet ID (for corp routing)
+ * @param {string} customSheetName - Optional custom sheet/tab name (for corp routing)
  * @returns {Promise<Object>} Append result
  */
-async function appendRows(rows, customSheetId = null) {
+async function appendRows(rows, customSheetId = null, customSheetName = null) {
     const sheets = getClient();
     const spreadsheetId = customSheetId || config.sheets.spreadsheetId;
-    const sheetName = config.sheets.sheetName || 'Sheet1';
+    const sheetName = customSheetName || config.sheets.sheetName || 'Sheet1';
     const range = `${sheetName}!A:T`; // 20 columns: A-T
 
     try {
@@ -58,10 +60,10 @@ async function appendRows(rows, customSheetId = null) {
             },
         });
 
-        logger.info(`Appended ${rows.length} row(s) to sheet ${spreadsheetId}: ${response.data.updates?.updatedRange}`);
+        logger.info(`Appended ${rows.length} row(s) to ${spreadsheetId}/${sheetName}: ${response.data.updates?.updatedRange}`);
         return response.data;
     } catch (error) {
-        logger.error(`Failed to append rows to sheet ${spreadsheetId}`, error);
+        logger.error(`Failed to append rows to ${spreadsheetId}/${sheetName}`, error);
         throw error;
     }
 }
