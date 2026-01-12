@@ -112,28 +112,29 @@ async function handleEvent(event) {
             return;
         }
 
-        // Check if verbose mode is enabled
-        const isVerbose = process.env.VERBOSE === 'true';
+        // Check verbose modes
+        const isDebugMode = process.env.DEBUG_MODE === 'true';
+        const isReturnOutput = process.env.RETURN_OUTPUT === 'true';
 
-        // Step 1: Send processing notification
-        await lineService.replyText(
-            event.replyToken,
-            `🔄 Processing your receipt image...\n📊 Quota: ${availability.count + 1}/${availability.limit}`
-        );
+        // Step 1: Send processing notification (always show quota in debug mode)
+        const processingMsg = isDebugMode 
+            ? `🔄 Processing your receipt image...\n📊 Quota: ${availability.count + 1}/${availability.limit}`
+            : '🔄 Processing your receipt image...';
+        await lineService.replyText(event.replyToken, processingMsg);
 
         // Step 1.5: Get user profile for logging
         logger.info('Getting user profile...');
         const userInfo = await lineService.getUserProfile(userId);
 
         // Step 2: Download image from LINE
-        if (isVerbose) {
+        if (isDebugMode) {
             await lineService.pushText(userId, '📥 Step 1/4: Downloading image...');
         }
         logger.info(`Downloading image: ${messageId}`);
         const imageBuffer = await lineService.downloadImage(messageId);
 
         // Step 3: Process with Gemini AI (Vision)
-        if (isVerbose) {
+        if (isDebugMode) {
             await lineService.pushText(userId, '🔍 Step 2/4: Processing with Gemini AI...');
         }
         logger.info('Processing with Gemini AI...');
@@ -143,7 +144,7 @@ async function handleEvent(event) {
         await usageService.incrementUsage();
 
         // Step 4: Upload to Google Drive
-        if (isVerbose) {
+        if (isDebugMode) {
             await lineService.pushText(userId, '📁 Step 3/4: Uploading to Google Drive...');
         }
         logger.info('Uploading to Google Drive...');
@@ -155,16 +156,21 @@ async function handleEvent(event) {
         );
 
         // Step 5: Append to Google Sheets (multi-row format with user info)
-        if (isVerbose) {
+        if (isDebugMode) {
             await lineService.pushText(userId, '📊 Step 4/4: Saving to Google Sheets...');
         }
         logger.info('Saving to Google Sheets...');
         const rows = geminiService.formatForSheets(ocrData, uploadResult.url, timestamp, userInfo);
         await sheetsService.appendRows(rows);
 
-        // Step 6: Send success message with extracted data
-        const successMessage = formatSuccessMessage(ocrData, uploadResult.url);
-        await lineService.pushText(userId, successMessage);
+        // Step 6: Send success message with extracted data (only if RETURN_OUTPUT is true)
+        if (isReturnOutput) {
+            const successMessage = formatSuccessMessage(ocrData, uploadResult.url);
+            await lineService.pushText(userId, successMessage);
+        } else {
+            // Minimal confirmation
+            await lineService.pushText(userId, '✅ Invoice processed and saved!');
+        }
 
         logger.info('Invoice processed successfully', {
             messageId,

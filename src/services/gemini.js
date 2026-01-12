@@ -1,6 +1,7 @@
 /**
  * Gemini AI Service - Invoice Parser
- * Uses Gemini 2.0 Flash Vision to extract structured data from invoice images
+ * Uses Gemini Vision to extract structured data from invoice images
+ * Features: Model fallback, JSON validation, configurable model
  */
 
 const { GoogleGenerativeAI } = require('@google/generative-ai');
@@ -8,6 +9,13 @@ const logger = require('../utils/logger');
 
 // Initialize Gemini client
 let genAI = null;
+
+// Model fallback chain (try in order)
+const MODEL_FALLBACK_CHAIN = [
+    'gemini-2.5-flash',
+    'gemini-2.0-flash',
+    'gemini-2.0-flash-001',
+];
 
 function getClient() {
     if (!genAI) {
@@ -18,6 +26,13 @@ function getClient() {
         genAI = new GoogleGenerativeAI(apiKey);
     }
     return genAI;
+}
+
+/**
+ * Get the model to use (from env or default with fallback support)
+ */
+function getModelName() {
+    return process.env.GEMINI_MODEL || MODEL_FALLBACK_CHAIN[0];
 }
 
 /**
@@ -32,11 +47,12 @@ CRITICAL RULES:
 4. Skip discount lines, service charges, and totals - only extract actual products/services
 5. For Thai text, preserve the original Thai characters
 6. Calculate confidence based on image clarity and how certain you are
+7. For dates, use ISO format YYYY-MM-DD (e.g., "2026-01-11")
 
 OUTPUT FORMAT - Return ONLY valid JSON, no markdown, no explanation:
 {
   "invoiceNumber": "string or null",
-  "invoiceDate": "string or null",
+  "invoiceDate": "YYYY-MM-DD format or null",
   "sellerName": "string or null",
   "sellerTaxId": "string (13 digits) or null",
   "sellerBranch": "string or null",
@@ -63,68 +79,151 @@ EXAMPLES:
 - "Service Charge 10%" is NOT a lineItem, skip it`;
 
 /**
+ * Required fields for JSON validation
+ */
+const REQUIRED_FIELDS = ['grandTotal', 'confidence'];
+const OPTIONAL_FIELDS = ['invoiceNumber', 'invoiceDate', 'sellerName', 'sellerTaxId', 
+                          'sellerBranch', 'buyerName', 'buyerTaxId', 'lineItems', 
+                          'subtotal', 'vatAmount'];
+
+/**
+ * Validate JSON schema from Gemini response
+ */
+function validateJsonSchema(data) {
+    const errors = [];
+    
+    // Check required fields
+    for (const field of REQUIRED_FIELDS) {
+        if (data[field] === undefined || data[field] === null) {
+            errors.push(`Missing required field: ${field}`);
+        }
+    }
+    
+    // Validate lineItems is an array
+    if (data.lineItems && !Array.isArray(data.lineItems)) {
+        errors.push('lineItems must be an array');
+    }
+    
+    // Validate confidence is a number between 0-1
+    if (typeof data.confidence !== 'number' || data.confidence < 0 || data.confidence > 1) {
+        // Try to parse it
+        const conf = parseFloat(data.confidence);
+        if (isNaN(conf)) {
+            errors.push('confidence must be a number between 0 and 1');
+        }
+    }
+    
+    // Validate grandTotal is a number
+    if (data.grandTotal !== null && data.grandTotal !== undefined) {
+        const total = parseNumber(data.grandTotal);
+        if (total === null) {
+            errors.push('grandTotal must be a valid number');
+        }
+    }
+    
+    return {
+        isValid: errors.length === 0,
+        errors,
+    };
+}
+
+/**
+ * Check if debug mode is enabled
+ */
+function isDebugMode() {
+    return process.env.DEBUG_MODE === 'true';
+}
+
+/**
  * Process an invoice image with Gemini Vision
+ * Features: Model fallback chain, retries, JSON validation
  * @param {Buffer} imageBuffer - The image data
  * @param {string} mimeType - Image MIME type
  * @returns {Promise<Object>} Parsed invoice data
  */
 async function parseInvoice(imageBuffer, mimeType = 'image/jpeg') {
     const maxRetries = 3;
+    const modelsToTry = [getModelName(), ...MODEL_FALLBACK_CHAIN.filter(m => m !== getModelName())];
     let lastError;
 
-    for (let attempt = 1; attempt <= maxRetries; attempt++) {
-        try {
-            const client = getClient();
-            // Use gemini-2.5-flash - stable model with image input support
-            const model = client.getGenerativeModel({ model: 'gemini-2.5-flash' });
+    for (const modelName of modelsToTry) {
+        for (let attempt = 1; attempt <= maxRetries; attempt++) {
+            try {
+                const client = getClient();
+                const model = client.getGenerativeModel({ model: modelName });
 
-            logger.info(`Processing invoice with Gemini Vision (attempt ${attempt}/${maxRetries})...`);
+                if (isDebugMode()) {
+                    logger.info(`[DEBUG] Using model: ${modelName} (attempt ${attempt}/${maxRetries})`);
+                }
 
-            // Prepare image for Gemini
-            const imagePart = {
-                inlineData: {
-                    data: imageBuffer.toString('base64'),
-                    mimeType,
-                },
-            };
+                // Prepare image for Gemini
+                const imagePart = {
+                    inlineData: {
+                        data: imageBuffer.toString('base64'),
+                        mimeType,
+                    },
+                };
 
-            // Generate content
-            const result = await model.generateContent([INVOICE_PROMPT, imagePart]);
-            const response = await result.response;
-            const text = response.text();
+                // Generate content
+                const result = await model.generateContent([INVOICE_PROMPT, imagePart]);
+                const response = await result.response;
+                const text = response.text();
 
-            logger.info('Gemini response received', { responseLength: text.length });
+                if (isDebugMode()) {
+                    logger.info(`[DEBUG] Gemini raw response length: ${text.length}`);
+                }
 
-            // Parse JSON from response
-            const jsonData = parseJsonResponse(text);
-            
-            // Validate and normalize data
-            const normalizedData = normalizeInvoiceData(jsonData);
+                // Parse JSON from response
+                const jsonData = parseJsonResponse(text);
+                
+                // Validate JSON schema
+                const validation = validateJsonSchema(jsonData);
+                if (!validation.isValid) {
+                    logger.warn('JSON validation warnings', { errors: validation.errors });
+                    // Continue anyway but log the issues
+                }
+                
+                // Normalize data
+                const normalizedData = normalizeInvoiceData(jsonData);
 
-            logger.info('Invoice parsed successfully', {
-                itemCount: normalizedData.lineItems.length,
-                grandTotal: normalizedData.grandTotal,
-                confidence: normalizedData.confidence,
-            });
+                if (isDebugMode()) {
+                    logger.info('[DEBUG] Invoice parsed successfully', {
+                        model: modelName,
+                        itemCount: normalizedData.lineItems.length,
+                        grandTotal: normalizedData.grandTotal,
+                        confidence: normalizedData.confidence,
+                    });
+                }
 
-            return normalizedData;
-        } catch (error) {
-            lastError = error;
-            
-            // Check if rate limit error
-            if (error.message && error.message.includes('429')) {
-                const waitTime = Math.pow(2, attempt) * 5000; // 5s, 10s, 20s
-                logger.warn(`Rate limit hit, waiting ${waitTime/1000}s before retry...`);
-                await new Promise(resolve => setTimeout(resolve, waitTime));
-                continue;
+                return normalizedData;
+            } catch (error) {
+                lastError = error;
+                
+                // Check if rate limit error - retry with backoff
+                if (error.message && error.message.includes('429')) {
+                    const waitTime = Math.pow(2, attempt) * 5000;
+                    if (isDebugMode()) {
+                        logger.warn(`[DEBUG] Rate limit hit, waiting ${waitTime/1000}s before retry...`);
+                    }
+                    await new Promise(resolve => setTimeout(resolve, waitTime));
+                    continue;
+                }
+                
+                // Model not found - try next model
+                if (error.message && error.message.includes('404')) {
+                    if (isDebugMode()) {
+                        logger.warn(`[DEBUG] Model ${modelName} not found, trying next...`);
+                    }
+                    break; // Break inner loop, try next model
+                }
+                
+                // Other error - throw immediately
+                throw error;
             }
-            
-            // Non-rate-limit error, throw immediately
-            throw error;
         }
     }
 
-    logger.error('Failed to parse invoice after all retries', lastError);
+    logger.error('Failed to parse invoice after all models and retries', lastError);
     throw lastError;
 }
 
@@ -132,7 +231,6 @@ async function parseInvoice(imageBuffer, mimeType = 'image/jpeg') {
  * Parse JSON from Gemini response (handles markdown code blocks)
  */
 function parseJsonResponse(text) {
-    // Remove markdown code blocks if present
     let jsonStr = text.trim();
     
     // Handle ```json ... ``` format
@@ -154,7 +252,7 @@ function parseJsonResponse(text) {
 function normalizeInvoiceData(data) {
     return {
         invoiceNumber: data.invoiceNumber || null,
-        invoiceDate: data.invoiceDate || null,
+        invoiceDate: normalizeDate(data.invoiceDate),
         sellerName: data.sellerName || null,
         sellerTaxId: extractTaxId(data.sellerTaxId),
         sellerBranch: data.sellerBranch || null,
@@ -166,6 +264,28 @@ function normalizeInvoiceData(data) {
         grandTotal: parseNumber(data.grandTotal) || 0,
         confidence: Math.min(1, Math.max(0, parseFloat(data.confidence) || 0.5)),
     };
+}
+
+/**
+ * Normalize date to YYYY-MM-DD format (prevents Excel serial number issue)
+ */
+function normalizeDate(dateStr) {
+    if (!dateStr) return null;
+    
+    // If already in ISO format, return as-is
+    if (/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
+        return dateStr;
+    }
+    
+    // Try to parse various date formats
+    const parsed = new Date(dateStr);
+    if (!isNaN(parsed.getTime())) {
+        // Return as YYYY-MM-DD string (prevents Excel auto-conversion)
+        return parsed.toISOString().split('T')[0];
+    }
+    
+    // If can't parse, return original string prefixed with apostrophe (forces text in Excel)
+    return `'${dateStr}`;
 }
 
 /**
@@ -206,18 +326,13 @@ function parseNumber(value) {
 
 /**
  * Format parsed invoice data for Google Sheets
- * @param {Object} data - Parsed invoice data from Gemini
- * @param {string} imageUrl - URL of saved image
- * @param {string} timestamp - Processing timestamp
- * @param {Object} userInfo - LINE user info
- * @returns {Array<Array>} Rows for sheets
  */
 function formatForSheets(data, imageUrl, timestamp, userInfo = {}) {
-    // Common header data (columns A-H)
+    // Header data (columns A-H)
     const headerData = [
         timestamp,                          // A: Processed At
         data.invoiceNumber || '',           // B: Invoice Number
-        data.invoiceDate || '',             // C: Invoice Date
+        data.invoiceDate || '',             // C: Invoice Date (now normalized)
         data.sellerName || '',              // D: Seller Name
         data.sellerTaxId || '',             // E: Seller Tax ID
         data.sellerBranch || '',            // F: Seller Branch
@@ -225,22 +340,21 @@ function formatForSheets(data, imageUrl, timestamp, userInfo = {}) {
         data.buyerTaxId || '',              // H: Buyer Tax ID
     ];
 
-    // Common totals data (columns N-U)
+    // Totals data (columns N-U)
     const totalsData = [
         data.subtotal || '',                // N: Subtotal
         data.vatAmount || '',               // O: VAT 7%
         data.grandTotal || '',              // P: Grand Total
         imageUrl || '',                     // Q: Image URL
-        '',                                 // R: Status
+        '',                                 // R: Status (for manual verification)
         userInfo.userId || '',              // S: User ID
         userInfo.displayName || '',         // T: User Name
-        data.confidence?.toFixed(2) || '',  // U: Confidence (NEW)
+        data.confidence?.toFixed(2) || '',  // U: Confidence
     ];
 
     const rows = [];
 
     if (data.lineItems.length === 0) {
-        // No items: 1 row with empty item columns
         rows.push([
             ...headerData,
             '',                             // I: Item #
@@ -251,7 +365,6 @@ function formatForSheets(data, imageUrl, timestamp, userInfo = {}) {
             ...totalsData,
         ]);
     } else {
-        // N items: N rows, each with header + item + totals
         data.lineItems.forEach(item => {
             rows.push([
                 ...headerData,
@@ -269,7 +382,7 @@ function formatForSheets(data, imageUrl, timestamp, userInfo = {}) {
 }
 
 /**
- * Get sheet headers including confidence column
+ * Get sheet headers
  */
 function getSheetHeaders() {
     return [
@@ -293,7 +406,7 @@ function getSheetHeaders() {
         'Status',            // R
         'User ID',           // S
         'User Name',         // T
-        'Confidence',        // U (NEW)
+        'Confidence',        // U
     ];
 }
 
@@ -301,4 +414,5 @@ module.exports = {
     parseInvoice,
     formatForSheets,
     getSheetHeaders,
+    isDebugMode,
 };
