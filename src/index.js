@@ -468,6 +468,58 @@ async function handleTextMessage(event, userId) {
         return;
     }
     
+    // Register command for existing friends
+    if (textLower === '/register' || textLower === 'register') {
+        // Check if user already exists
+        const existingUser = await configService.getUserByLineId(userId);
+        
+        if (existingUser) {
+            if (existingUser.status === 'active') {
+                await lineService.replyText(
+                    event.replyToken,
+                    `✅ You're already registered!\n\n🏢 Corp: ${existingUser.corp}\n📷 Send me a receipt image to process.`
+                );
+            } else if (existingUser.status === 'pending') {
+                await lineService.replyText(
+                    event.replyToken,
+                    `⏳ Your registration is pending approval.\nPlease wait for admin to activate your account.`
+                );
+            } else {
+                await lineService.replyText(
+                    event.replyToken,
+                    '⚠️ Your account is not active. Please contact admin.'
+                );
+            }
+            return;
+        }
+        
+        // Show corp selection for new user
+        const corps = await configService.getAllCorps();
+        
+        if (corps.length === 0) {
+            await lineService.replyText(
+                event.replyToken,
+                '⚠️ No corporations configured. Please contact admin.'
+            );
+            return;
+        }
+        
+        await lineService.replyWithQuickReply(
+            event.replyToken,
+            '📋 Please select your corporation to register:',
+            corps.map(corp => ({
+                type: 'action',
+                action: {
+                    type: 'postback',
+                    label: corp,
+                    data: `register_corp=${corp}`,
+                    displayText: corp,
+                }
+            }))
+        );
+        return;
+    }
+    
     // Usage check command
     if (textLower === '/usage' || textLower === 'usage' || textLower === 'quota') {
         const stats = await usageService.getUsageStats();
