@@ -425,7 +425,7 @@ function parseNumber(value) {
 
 /**
  * Format parsed invoice data for Google Sheets
- * 18-column layout: A-R
+ * 20-column layout: A-T
  */
 function formatForSheets(data, imageUrl, timestamp, userInfo = {}) {
     // Header data (columns A-G)
@@ -439,13 +439,15 @@ function formatForSheets(data, imageUrl, timestamp, userInfo = {}) {
         data.expenseCategory || 'Other',    // G: Expense Category
     ];
 
-    // Totals data (columns N-R)
+    // Totals data (columns N-T)
     const totalsData = [
         data.subtotal || '',                // N: Subtotal
         data.vatAmount || '',               // O: VAT 7%
         data.grandTotal || '',              // P: Grand Total
         imageUrl || '',                     // Q: Image URL
         data.confidence?.toFixed(2) || '',  // R: Confidence
+        userInfo.userId || '',              // S: User ID
+        userInfo.displayName || '',         // T: User Name
     ];
 
     const rows = [];
@@ -480,7 +482,7 @@ function formatForSheets(data, imageUrl, timestamp, userInfo = {}) {
 }
 
 /**
- * Get sheet headers (18 columns: A-R)
+ * Get sheet headers (20 columns: A-T)
  */
 function getSheetHeaders() {
     return [
@@ -496,12 +498,14 @@ function getSheetHeaders() {
         'Description',       // J
         'Quantity',          // K
         'Unit Price',        // L
-        'Amount',            // M (renamed from Line Amount)
+        'Amount',            // M
         'Subtotal',          // N
         'VAT 7%',            // O
         'Grand Total',       // P
         'Image URL',         // Q
         'Confidence',        // R
+        'User ID',           // S
+        'User Name',         // T
     ];
 }
 
