@@ -41,13 +41,17 @@ function getModelName() {
 const INVOICE_PROMPT = `You are a Thai invoice/receipt parser. Analyze this image and extract ALL data accurately.
 
 CRITICAL RULES:
-1. Count ALL line items (products/services) in the invoice
+1. Count ALL line items including products, services, discounts, and credit notes
 2. Return EXACTLY that many items in lineItems array
 3. If an item spans multiple lines, combine them into one item
-4. Skip discount lines, service charges, and totals - only extract actual products/services
+4. INCLUDE discounts and credit notes - they are valid line items with negative amounts
 5. For Thai text, preserve the original Thai characters
 6. Calculate confidence based on image clarity and how certain you are
 7. For dates, use ISO format YYYY-MM-DD (e.g., "2026-01-11")
+8. Classify each line item type:
+   - "item" = regular product/service (positive amount)
+   - "discount" = ส่วนลด, promotion, discount (negative amount)
+   - "credit" = CN/Credit Note, refund, return (negative amount)
 
 OUTPUT FORMAT - Return ONLY valid JSON, no markdown, no explanation:
 {
@@ -60,23 +64,24 @@ OUTPUT FORMAT - Return ONLY valid JSON, no markdown, no explanation:
   "buyerTaxId": "string or null",
   "lineItems": [
     {
-      "description": "product/service name",
+      "lineType": "item | discount | credit",
+      "description": "product/service/discount name",
       "quantity": "number as string or null",
       "unitPrice": "number or null",
-      "amount": "number (line total)"
+      "amount": "number (can be negative for discounts/credits)"
     }
   ],
   "subtotal": "number or null",
   "vatAmount": "number or null",
-  "grandTotal": "number (required)",
+  "grandTotal": "number (required - net after all discounts)",
   "confidence": "number 0.0-1.0 based on extraction certainty"
 }
 
 EXAMPLES:
-- If receipt shows 1 massage service = 1 lineItem
-- If receipt shows 2 different products = 2 lineItems
-- "Promotion & Discount" is NOT a lineItem, skip it
-- "Service Charge 10%" is NOT a lineItem, skip it`;
+- Regular product = { "lineType": "item", "description": "Massage 60 min", "amount": 1200 }
+- Discount line = { "lineType": "discount", "description": "ส่วนลด 10%", "amount": -120 }
+- Credit note = { "lineType": "credit", "description": "CN5302-00001", "amount": -97865.84 }
+- If document shows "DN" prefix = item, "CN" prefix = credit`;
 
 /**
  * Required fields for JSON validation
@@ -289,18 +294,37 @@ function normalizeDate(dateStr) {
 }
 
 /**
- * Normalize line items
+ * Normalize line items - includes discounts and credit notes
  */
 function normalizeLineItems(items) {
     if (!Array.isArray(items)) return [];
     
-    return items.map((item, index) => ({
-        itemNumber: index + 1,
-        description: item.description || '',
-        quantity: item.quantity || null,
-        unitPrice: parseNumber(item.unitPrice),
-        amount: parseNumber(item.amount) || 0,
-    })).filter(item => item.description && item.amount > 0);
+    return items.map((item, index) => {
+        const amount = parseNumber(item.amount) || 0;
+        
+        // Determine line type (default to 'item' if not specified)
+        let lineType = item.lineType?.toLowerCase() || 'item';
+        
+        // Auto-detect type from amount if not specified
+        if (lineType === 'item' && amount < 0) {
+            // Check if description suggests credit or discount
+            const desc = (item.description || '').toLowerCase();
+            if (desc.includes('cn') || desc.includes('credit') || desc.includes('refund')) {
+                lineType = 'credit';
+            } else {
+                lineType = 'discount';
+            }
+        }
+        
+        return {
+            itemNumber: index + 1,
+            lineType: lineType,
+            description: item.description || '',
+            quantity: item.quantity || null,
+            unitPrice: parseNumber(item.unitPrice),
+            amount: amount,
+        };
+    }).filter(item => item.description && item.amount !== 0);
 }
 
 /**
@@ -326,6 +350,7 @@ function parseNumber(value) {
 
 /**
  * Format parsed invoice data for Google Sheets
+ * Column layout: A-H (header), I (item#), J (lineType), K (desc), L (qty), M (price), N (amount), O-V (totals)
  */
 function formatForSheets(data, imageUrl, timestamp, userInfo = {}) {
     // Header data (columns A-H)
@@ -340,16 +365,16 @@ function formatForSheets(data, imageUrl, timestamp, userInfo = {}) {
         data.buyerTaxId || '',              // H: Buyer Tax ID
     ];
 
-    // Totals data (columns N-U)
+    // Totals data (columns O-V)
     const totalsData = [
-        data.subtotal || '',                // N: Subtotal
-        data.vatAmount || '',               // O: VAT 7%
-        data.grandTotal || '',              // P: Grand Total
-        imageUrl || '',                     // Q: Image URL
-        '',                                 // R: Status (for manual verification)
-        userInfo.userId || '',              // S: User ID
-        userInfo.displayName || '',         // T: User Name
-        data.confidence?.toFixed(2) || '',  // U: Confidence
+        data.subtotal || '',                // O: Subtotal
+        data.vatAmount || '',               // P: VAT 7%
+        data.grandTotal || '',              // Q: Grand Total
+        imageUrl || '',                     // R: Image URL
+        '',                                 // S: Status (for manual verification)
+        userInfo.userId || '',              // T: User ID
+        userInfo.displayName || '',         // U: User Name
+        data.confidence?.toFixed(2) || '',  // V: Confidence
     ];
 
     const rows = [];
@@ -358,10 +383,11 @@ function formatForSheets(data, imageUrl, timestamp, userInfo = {}) {
         rows.push([
             ...headerData,
             '',                             // I: Item #
-            '',                             // J: Item Description
-            '',                             // K: Quantity
-            '',                             // L: Unit Price
-            '',                             // M: Line Amount
+            '',                             // J: Line Type
+            '',                             // K: Item Description
+            '',                             // L: Quantity
+            '',                             // M: Unit Price
+            '',                             // N: Line Amount
             ...totalsData,
         ]);
     } else {
@@ -369,10 +395,11 @@ function formatForSheets(data, imageUrl, timestamp, userInfo = {}) {
             rows.push([
                 ...headerData,
                 String(item.itemNumber),    // I: Item #
-                item.description || '',     // J: Item Description
-                item.quantity || '',        // K: Quantity
-                item.unitPrice || '',       // L: Unit Price
-                item.amount || '',          // M: Line Amount
+                item.lineType || 'item',    // J: Line Type (item/discount/credit)
+                item.description || '',     // K: Item Description
+                item.quantity || '',        // L: Quantity
+                item.unitPrice || '',       // M: Unit Price
+                item.amount || '',          // N: Line Amount
                 ...totalsData,
             ]);
         });
@@ -382,7 +409,7 @@ function formatForSheets(data, imageUrl, timestamp, userInfo = {}) {
 }
 
 /**
- * Get sheet headers
+ * Get sheet headers (22 columns: A-V)
  */
 function getSheetHeaders() {
     return [
@@ -395,18 +422,19 @@ function getSheetHeaders() {
         'Buyer Name',        // G
         'Buyer Tax ID',      // H
         'Item #',            // I
-        'Item Description',  // J
-        'Quantity',          // K
-        'Unit Price',        // L
-        'Line Amount',       // M
-        'Subtotal',          // N
-        'VAT 7%',            // O
-        'Grand Total',       // P
-        'Image URL',         // Q
-        'Status',            // R
-        'User ID',           // S
-        'User Name',         // T
-        'Confidence',        // U
+        'Line Type',         // J (NEW: item/discount/credit)
+        'Item Description',  // K
+        'Quantity',          // L
+        'Unit Price',        // M
+        'Line Amount',       // N
+        'Subtotal',          // O
+        'VAT 7%',            // P
+        'Grand Total',       // Q
+        'Image URL',         // R
+        'Status',            // S
+        'User ID',           // T
+        'User Name',         // U
+        'Confidence',        // V
     ];
 }
 
