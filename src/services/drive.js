@@ -53,17 +53,18 @@ function getClient() {
 /**
  * Find or create a date-formatted folder (YYYYMMDD)
  * @param {Date} date - Date for folder name
+ * @param {string} parentFolderId - Optional parent folder ID (for corp-specific routing)
  * @returns {Promise<string>} Folder ID
  */
-async function getOrCreateDateFolder(date = new Date()) {
+async function getOrCreateDateFolder(date = new Date(), parentFolderId = null) {
     const drive = getClient();
     const folderName = formatDateFolder(date);
-    const parentFolderId = config.drive.folderId;
+    const parentId = parentFolderId || config.drive.folderId;
 
     try {
         // Search for existing folder
         const searchResponse = await drive.files.list({
-            q: `name='${folderName}' and mimeType='application/vnd.google-apps.folder' and '${parentFolderId}' in parents and trashed=false`,
+            q: `name='${folderName}' and mimeType='application/vnd.google-apps.folder' and '${parentId}' in parents and trashed=false`,
             fields: 'files(id, name)',
             spaces: 'drive',
         });
@@ -79,7 +80,7 @@ async function getOrCreateDateFolder(date = new Date()) {
             requestBody: {
                 name: folderName,
                 mimeType: 'application/vnd.google-apps.folder',
-                parents: [parentFolderId],
+                parents: [parentId],
             },
             fields: 'id',
         });
@@ -97,15 +98,16 @@ async function getOrCreateDateFolder(date = new Date()) {
  * @param {Buffer} imageBuffer - Image data
  * @param {string} fileName - Name for the file
  * @param {string} mimeType - MIME type of the image
+ * @param {string} corpFolderId - Optional corp-specific folder ID
  * @param {Date} date - Date for folder organization
  * @returns {Promise<Object>} Upload result with file ID and URL
  */
-async function uploadImage(imageBuffer, fileName, mimeType = 'image/jpeg', date = new Date()) {
+async function uploadImage(imageBuffer, fileName, mimeType = 'image/jpeg', corpFolderId = null, date = new Date()) {
     const drive = getClient();
 
     try {
-        // Get or create the date folder
-        const folderId = await getOrCreateDateFolder(date);
+        // Get or create the date folder (within corp folder if specified)
+        const folderId = await getOrCreateDateFolder(date, corpFolderId);
 
         // Create readable stream from buffer
         const { Readable } = require('stream');

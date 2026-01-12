@@ -112,12 +112,38 @@ async function getUserProfile(userId) {
     }
 }
 
+/**
+ * Reply with Quick Reply buttons
+ * @param {string} replyToken - Reply token from webhook event
+ * @param {string} text - Message text to show
+ * @param {Array} items - Quick Reply items array
+ */
+async function replyWithQuickReply(replyToken, text, items) {
+    try {
+        await client.replyMessage({
+            replyToken,
+            messages: [{
+                type: 'text',
+                text,
+                quickReply: {
+                    items: items.slice(0, 13), // LINE limits to 13 items
+                },
+            }],
+        });
+        logger.debug(`Replied with Quick Reply: ${items.length} options`);
+    } catch (error) {
+        logger.error('Failed to send Quick Reply', error);
+        throw error;
+    }
+}
+
 module.exports = {
     client,
     blobClient,
     downloadImage,
     replyText,
     pushText,
+    replyWithQuickReply,
     getMiddleware,
     getUserProfile,
 };

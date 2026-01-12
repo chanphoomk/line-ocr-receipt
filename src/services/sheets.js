@@ -2,12 +2,13 @@
  * Google Sheets Service
  * Handles appending extracted invoice data to spreadsheet
  * Supports multi-row format (one row per line item)
+ * Supports dynamic sheet routing for multi-corp setup
  */
 
 const { google } = require('googleapis');
 const config = require('../config/env');
 const logger = require('../utils/logger');
-const { getSheetHeaders } = require('./ocr');
+const { getSheetHeaders } = require('./gemini');  // Updated: import from gemini.js
 
 // Initialize Sheets client
 let sheetsClient = null;
@@ -27,22 +28,24 @@ function getClient() {
 /**
  * Append a single row of data to the configured Google Sheet
  * @param {Array} rowData - Array of values to append as a row
+ * @param {string} customSheetId - Optional custom spreadsheet ID (for corp routing)
  * @returns {Promise<Object>} Append result
  */
-async function appendRow(rowData) {
-    return appendRows([rowData]);
+async function appendRow(rowData, customSheetId = null) {
+    return appendRows([rowData], customSheetId);
 }
 
 /**
  * Append multiple rows to the sheet (for multi-row invoice format)
  * @param {Array<Array>} rows - Array of row arrays
+ * @param {string} customSheetId - Optional custom spreadsheet ID (for corp routing)
  * @returns {Promise<Object>} Append result
  */
-async function appendRows(rows) {
+async function appendRows(rows, customSheetId = null) {
     const sheets = getClient();
-    const spreadsheetId = config.sheets.spreadsheetId;
-    const sheetName = config.sheets.sheetName;
-    const range = `${sheetName}!A:R`; // Updated to cover all 18 columns
+    const spreadsheetId = customSheetId || config.sheets.spreadsheetId;
+    const sheetName = config.sheets.sheetName || 'Sheet1';
+    const range = `${sheetName}!A:T`; // 20 columns: A-T
 
     try {
         const response = await sheets.spreadsheets.values.append({
@@ -55,10 +58,10 @@ async function appendRows(rows) {
             },
         });
 
-        logger.info(`Appended ${rows.length} row(s) to sheet: ${response.data.updates?.updatedRange}`);
+        logger.info(`Appended ${rows.length} row(s) to sheet ${spreadsheetId}: ${response.data.updates?.updatedRange}`);
         return response.data;
     } catch (error) {
-        logger.error('Failed to append rows to sheet', error);
+        logger.error(`Failed to append rows to sheet ${spreadsheetId}`, error);
         throw error;
     }
 }

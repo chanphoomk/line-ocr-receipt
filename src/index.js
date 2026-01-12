@@ -1,6 +1,6 @@
 /**
  * LINE OCR Receipt Processor
- * Main server entry point
+ * Main server entry point - Multi-Corp Version
  */
 
 const express = require('express');
@@ -12,6 +12,7 @@ const geminiService = require('./services/gemini');
 const driveService = require('./services/drive');
 const sheetsService = require('./services/sheets');
 const usageService = require('./services/usage');
+const configService = require('./services/configService');
 
 const app = express();
 
@@ -59,29 +60,29 @@ app.post('/webhook', lineService.getMiddleware(), async (req, res) => {
  * @param {Object} event - LINE webhook event
  */
 async function handleEvent(event) {
+    const userId = event.source?.userId;
+    
     logger.info('Received event', {
         type: event.type,
         messageType: event.message?.type,
-        userId: event.source?.userId,
+        userId,
     });
+
+    // Handle follow event (user adds bot as friend)
+    if (event.type === 'follow') {
+        await handleFollowEvent(event, userId);
+        return;
+    }
+
+    // Handle postback (Quick Reply selections)
+    if (event.type === 'postback') {
+        await handlePostbackEvent(event, userId);
+        return;
+    }
 
     // Handle text messages - check for commands
     if (event.type === 'message' && event.message?.type === 'text') {
-        const text = event.message.text.toLowerCase().trim();
-
-        // Usage check command
-        if (text === '/usage' || text === 'usage' || text === 'quota') {
-            const stats = await usageService.getUsageStats();
-            const message = formatUsageMessage(stats);
-            await lineService.replyText(event.replyToken, message);
-            return;
-        }
-
-        // Default response for text messages
-        await lineService.replyText(
-            event.replyToken,
-            '📷 Please send me an image of a receipt or invoice to process.\n\nType "usage" to check your monthly quota.'
-        );
+        await handleTextMessage(event, userId);
         return;
     }
 
@@ -90,12 +91,32 @@ async function handleEvent(event) {
         return;
     }
 
-    const userId = event.source?.userId;
+    // Process image - userId already declared above
     const messageId = event.message.id;
     const timestamp = formatDateTime();
 
     try {
-        // Step 0: Check OCR availability (quota limit)
+        // Step 0a: Check user authorization and get corp config
+        const user = await configService.getUserByLineId(userId);
+        if (!user || user.status !== 'active' || !user.corp) {
+            await lineService.replyText(
+                event.replyToken,
+                configService.getUnauthorizedMessage()
+            );
+            return;
+        }
+
+        // Get corp configuration for routing
+        const corpConfig = await configService.getCorpConfig(user.corp);
+        if (!corpConfig || corpConfig.status !== 'active') {
+            await lineService.replyText(
+                event.replyToken,
+                '⚠️ Your corporation is not active. Please contact admin.'
+            );
+            return;
+        }
+
+        // Step 0b: Check OCR availability (quota limit)
         const availability = await usageService.checkOCRAvailability();
 
         if (!availability.canUseOCR) {
@@ -118,7 +139,7 @@ async function handleEvent(event) {
 
         // Step 1: Send processing notification (always show quota in debug mode)
         const processingMsg = isDebugMode 
-            ? `🔄 Processing your receipt image...\n📊 Quota: ${availability.count + 1}/${availability.limit}`
+            ? `🔄 Processing your receipt image...\n🏢 Corp: ${user.corp}\n📊 Quota: ${availability.count + 1}/${availability.limit}`
             : '🔄 Processing your receipt image...';
         await lineService.replyText(event.replyToken, processingMsg);
 
@@ -143,25 +164,26 @@ async function handleEvent(event) {
         // Step 3.5: Increment usage counter AFTER successful OCR
         await usageService.incrementUsage();
 
-        // Step 4: Upload to Google Drive
+        // Step 4: Upload to Google Drive (corp-specific folder)
         if (isDebugMode) {
             await lineService.pushText(userId, '📁 Step 3/4: Uploading to Google Drive...');
         }
-        logger.info('Uploading to Google Drive...');
-        const fileName = `receipt_${messageId}_${Date.now()}.jpg`;
+        logger.info(`Uploading to Google Drive (${user.corp})...`);
+        const fileName = `${user.corp}_receipt_${messageId}_${Date.now()}.jpg`;
         const uploadResult = await driveService.uploadImage(
             imageBuffer,
             fileName,
-            'image/jpeg'
+            'image/jpeg',
+            corpConfig.driveFolderId  // Use corp-specific folder
         );
 
-        // Step 5: Append to Google Sheets (multi-row format with user info)
+        // Step 5: Append to Google Sheets (corp-specific sheet)
         if (isDebugMode) {
             await lineService.pushText(userId, '📊 Step 4/4: Saving to Google Sheets...');
         }
-        logger.info('Saving to Google Sheets...');
+        logger.info(`Saving to Google Sheets (${user.corp})...`);
         const rows = geminiService.formatForSheets(ocrData, uploadResult.url, timestamp, userInfo);
-        await sheetsService.appendRows(rows);
+        await sheetsService.appendRows(rows, corpConfig.sheetId);  // Use corp-specific sheet
 
         // Step 6: Send success message with extracted data (only if RETURN_OUTPUT is true)
         if (isReturnOutput) {
@@ -279,7 +301,179 @@ function formatSuccessMessage(ocrData, imageUrl) {
     return lines.join('\n');
 }
 
+/**
+ * Handle follow event - user adds bot as friend
+ */
+async function handleFollowEvent(event, userId) {
+    logger.info('New user follow', { userId });
+    
+    try {
+        // Check if user exists in config sheet
+        const user = await configService.getUserByLineId(userId);
+        
+        if (!user) {
+            // User not pre-approved
+            await lineService.replyText(
+                event.replyToken,
+                configService.getUnauthorizedMessage()
+            );
+            return;
+        }
+        
+        // Get user profile
+        const profile = await lineService.getUserProfile(userId);
+        
+        if (user.status === 'pending') {
+            // Show corp selection
+            const corps = await configService.getAllCorps();
+            
+            if (corps.length === 0) {
+                await lineService.replyText(
+                    event.replyToken,
+                    '⚠️ No corporations configured. Please contact admin.'
+                );
+                return;
+            }
+            
+            // Update user name in sheet
+            await configService.updateUser(user.rowIndex, {
+                ...user,
+                userName: profile.displayName || '',
+            });
+            
+            // Send Quick Reply for corp selection
+            await lineService.replyWithQuickReply(
+                event.replyToken,
+                `👋 Welcome ${profile.displayName || 'User'}!\n\nPlease select your corporation:`,
+                corps.map(corp => ({
+                    type: 'action',
+                    action: {
+                        type: 'postback',
+                        label: corp,
+                        data: `select_corp=${corp}`,
+                        displayText: corp,
+                    }
+                }))
+            );
+        } else if (user.status === 'active') {
+            await lineService.replyText(
+                event.replyToken,
+                `👋 Welcome back ${profile.displayName || 'User'}!\n\n📷 Send me a receipt image to process.\n🏢 Your corp: ${user.corp}`
+            );
+        } else {
+            // Blocked or other status
+            await lineService.replyText(
+                event.replyToken,
+                '⚠️ Your account is not active. Please contact admin.'
+            );
+        }
+    } catch (error) {
+        logger.error('Error handling follow event', { error: error.message });
+        await lineService.replyText(
+            event.replyToken,
+            '❌ Error processing your request. Please try again.'
+        );
+    }
+}
 
+/**
+ * Handle postback event - Quick Reply selections
+ */
+async function handlePostbackEvent(event, userId) {
+    const data = event.postback?.data || '';
+    logger.info('Postback received', { userId, data });
+    
+    try {
+        // Handle corp selection
+        if (data.startsWith('select_corp=')) {
+            const corpName = data.replace('select_corp=', '');
+            
+            // Verify corp exists
+            const corpConfig = await configService.getCorpConfig(corpName);
+            if (!corpConfig) {
+                await lineService.replyText(
+                    event.replyToken,
+                    '❌ Invalid corporation. Please try again.'
+                );
+                return;
+            }
+            
+            // Get user and update
+            const user = await configService.getUserByLineId(userId);
+            if (user) {
+                await configService.updateUser(user.rowIndex, {
+                    ...user,
+                    corp: corpName,
+                    status: 'active',
+                });
+                
+                await lineService.replyText(
+                    event.replyToken,
+                    `✅ You are now registered with ${corpName}!\n\n📷 Send me a receipt image to get started.`
+                );
+            }
+        }
+    } catch (error) {
+        logger.error('Error handling postback', { error: error.message });
+        await lineService.replyText(
+            event.replyToken,
+            '❌ Error processing your selection. Please try again.'
+        );
+    }
+}
+
+/**
+ * Handle text messages - commands and admin actions
+ */
+async function handleTextMessage(event, userId) {
+    const text = event.message.text.trim();
+    const textLower = text.toLowerCase();
+    
+    // Usage check command
+    if (textLower === '/usage' || textLower === 'usage' || textLower === 'quota') {
+        const stats = await usageService.getUsageStats();
+        const message = formatUsageMessage(stats);
+        await lineService.replyText(event.replyToken, message);
+        return;
+    }
+    
+    // Admin change corp command
+    const adminCommand = process.env.ADMIN_CHANGE_COMMAND || 'ADMIN change corp';
+    if (text === adminCommand && configService.isAdmin(userId)) {
+        // Show corp selection for admin
+        const corps = await configService.getAllCorps();
+        await lineService.replyWithQuickReply(
+            event.replyToken,
+            '🔧 Admin: Select new corporation:',
+            corps.map(corp => ({
+                type: 'action',
+                action: {
+                    type: 'postback',
+                    label: corp,
+                    data: `select_corp=${corp}`,
+                    displayText: corp,
+                }
+            }))
+        );
+        return;
+    }
+    
+    // Check if user is authorized
+    const user = await configService.getUserByLineId(userId);
+    if (!user || user.status !== 'active') {
+        await lineService.replyText(
+            event.replyToken,
+            configService.getUnauthorizedMessage()
+        );
+        return;
+    }
+    
+    // Default response for text messages
+    await lineService.replyText(
+        event.replyToken,
+        `📷 Please send me an image of a receipt or invoice to process.\n\n🏢 Your corp: ${user.corp}\n\nType "usage" to check your monthly quota.`
+    );
+}
 
 /**
  * Format usage statistics message
