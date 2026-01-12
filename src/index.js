@@ -303,70 +303,63 @@ function formatSuccessMessage(ocrData, imageUrl) {
 
 /**
  * Handle follow event - user adds bot as friend
+ * Self-registration flow: Show corp selection, add to sheet as pending
  */
 async function handleFollowEvent(event, userId) {
     logger.info('New user follow', { userId });
     
     try {
-        // Check if user exists in config sheet
-        const user = await configService.getUserByLineId(userId);
+        // Get user profile
+        const profile = await lineService.getUserProfile(userId);
         
-        if (!user) {
-            // User not pre-approved
+        // Check if user already exists
+        const existingUser = await configService.getUserByLineId(userId);
+        
+        if (existingUser) {
+            if (existingUser.status === 'active') {
+                await lineService.replyText(
+                    event.replyToken,
+                    `👋 Welcome back ${profile.displayName || 'User'}!\n\n📷 Send me a receipt image to process.\n🏢 Your corp: ${existingUser.corp}`
+                );
+            } else if (existingUser.status === 'pending') {
+                await lineService.replyText(
+                    event.replyToken,
+                    `⏳ Hi ${profile.displayName || 'User'}!\n\nYour registration is pending approval.\nPlease wait for admin to activate your account.`
+                );
+            } else {
+                await lineService.replyText(
+                    event.replyToken,
+                    '⚠️ Your account is not active. Please contact admin.'
+                );
+            }
+            return;
+        }
+        
+        // New user - show corp selection
+        const corps = await configService.getAllCorps();
+        
+        if (corps.length === 0) {
             await lineService.replyText(
                 event.replyToken,
-                configService.getUnauthorizedMessage()
+                '⚠️ No corporations configured. Please contact admin.'
             );
             return;
         }
         
-        // Get user profile
-        const profile = await lineService.getUserProfile(userId);
-        
-        if (user.status === 'pending') {
-            // Show corp selection
-            const corps = await configService.getAllCorps();
-            
-            if (corps.length === 0) {
-                await lineService.replyText(
-                    event.replyToken,
-                    '⚠️ No corporations configured. Please contact admin.'
-                );
-                return;
-            }
-            
-            // Update user name in sheet
-            await configService.updateUser(user.rowIndex, {
-                ...user,
-                userName: profile.displayName || '',
-            });
-            
-            // Send Quick Reply for corp selection
-            await lineService.replyWithQuickReply(
-                event.replyToken,
-                `👋 Welcome ${profile.displayName || 'User'}!\n\nPlease select your corporation:`,
-                corps.map(corp => ({
-                    type: 'action',
-                    action: {
-                        type: 'postback',
-                        label: corp,
-                        data: `select_corp=${corp}`,
-                        displayText: corp,
-                    }
-                }))
-            );
-        } else if (user.status === 'active') {
-            await lineService.replyText(
-                event.replyToken,
-                `👋 Welcome back ${profile.displayName || 'User'}!\n\n📷 Send me a receipt image to process.\n🏢 Your corp: ${user.corp}`
-            );
-        } else {
-            // Blocked or other status
-            await lineService.replyText(
-                event.replyToken,
-                '⚠️ Your account is not active. Please contact admin.'
-            );
-        }
+        // Send Quick Reply for corp selection
+        await lineService.replyWithQuickReply(
+            event.replyToken,
+            `👋 Welcome ${profile.displayName || 'User'}!\n\n📋 Please select your corporation to register:`,
+            corps.map(corp => ({
+                type: 'action',
+                action: {
+                    type: 'postback',
+                    label: corp,
+                    data: `register_corp=${corp}`,
+                    displayText: corp,
+                }
+            }))
+        );
     } catch (error) {
         logger.error('Error handling follow event', { error: error.message });
         await lineService.replyText(
@@ -384,7 +377,44 @@ async function handlePostbackEvent(event, userId) {
     logger.info('Postback received', { userId, data });
     
     try {
-        // Handle corp selection
+        // Handle NEW user registration (add to sheet with pending status)
+        if (data.startsWith('register_corp=')) {
+            const corpName = data.replace('register_corp=', '');
+            
+            // Verify corp exists
+            const corpConfig = await configService.getCorpConfig(corpName);
+            if (!corpConfig) {
+                await lineService.replyText(
+                    event.replyToken,
+                    '❌ Invalid corporation. Please try again.'
+                );
+                return;
+            }
+            
+            // Get user profile
+            const profile = await lineService.getUserProfile(userId);
+            
+            // Add user to config sheet with PENDING status
+            await configService.addUser(userId, profile.displayName || '');
+            
+            // Update the user with corp (still pending)
+            const user = await configService.getUserByLineId(userId);
+            if (user) {
+                await configService.updateUser(user.rowIndex, {
+                    ...user,
+                    corp: corpName,
+                    status: 'pending',  // Admin must activate
+                });
+            }
+            
+            await lineService.replyText(
+                event.replyToken,
+                `✅ Registration submitted!\n\n🏢 Corporation: ${corpName}\n⏳ Status: Pending Approval\n\nPlease wait for admin to activate your account.`
+            );
+            return;
+        }
+        
+        // Handle existing user corp change (by admin)
         if (data.startsWith('select_corp=')) {
             const corpName = data.replace('select_corp=', '');
             
@@ -409,7 +439,7 @@ async function handlePostbackEvent(event, userId) {
                 
                 await lineService.replyText(
                     event.replyToken,
-                    `✅ You are now registered with ${corpName}!\n\n📷 Send me a receipt image to get started.`
+                    `✅ Corporation changed to ${corpName}!\n\n📷 Send me a receipt image to get started.`
                 );
             }
         }
