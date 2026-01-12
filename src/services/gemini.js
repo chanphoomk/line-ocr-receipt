@@ -69,44 +69,63 @@ EXAMPLES:
  * @returns {Promise<Object>} Parsed invoice data
  */
 async function parseInvoice(imageBuffer, mimeType = 'image/jpeg') {
-    try {
-        const client = getClient();
-        const model = client.getGenerativeModel({ model: 'gemini-2.0-flash' });
+    const maxRetries = 3;
+    let lastError;
 
-        logger.info('Processing invoice with Gemini Vision...');
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        try {
+            const client = getClient();
+            // Use gemini-1.5-flash which has higher free tier limits (1500 RPD)
+            const model = client.getGenerativeModel({ model: 'gemini-1.5-flash' });
 
-        // Prepare image for Gemini
-        const imagePart = {
-            inlineData: {
-                data: imageBuffer.toString('base64'),
-                mimeType,
-            },
-        };
+            logger.info(`Processing invoice with Gemini Vision (attempt ${attempt}/${maxRetries})...`);
 
-        // Generate content
-        const result = await model.generateContent([INVOICE_PROMPT, imagePart]);
-        const response = await result.response;
-        const text = response.text();
+            // Prepare image for Gemini
+            const imagePart = {
+                inlineData: {
+                    data: imageBuffer.toString('base64'),
+                    mimeType,
+                },
+            };
 
-        logger.info('Gemini response received', { responseLength: text.length });
+            // Generate content
+            const result = await model.generateContent([INVOICE_PROMPT, imagePart]);
+            const response = await result.response;
+            const text = response.text();
 
-        // Parse JSON from response
-        const jsonData = parseJsonResponse(text);
-        
-        // Validate and normalize data
-        const normalizedData = normalizeInvoiceData(jsonData);
+            logger.info('Gemini response received', { responseLength: text.length });
 
-        logger.info('Invoice parsed successfully', {
-            itemCount: normalizedData.lineItems.length,
-            grandTotal: normalizedData.grandTotal,
-            confidence: normalizedData.confidence,
-        });
+            // Parse JSON from response
+            const jsonData = parseJsonResponse(text);
+            
+            // Validate and normalize data
+            const normalizedData = normalizeInvoiceData(jsonData);
 
-        return normalizedData;
-    } catch (error) {
-        logger.error('Failed to parse invoice with Gemini', error);
-        throw error;
+            logger.info('Invoice parsed successfully', {
+                itemCount: normalizedData.lineItems.length,
+                grandTotal: normalizedData.grandTotal,
+                confidence: normalizedData.confidence,
+            });
+
+            return normalizedData;
+        } catch (error) {
+            lastError = error;
+            
+            // Check if rate limit error
+            if (error.message && error.message.includes('429')) {
+                const waitTime = Math.pow(2, attempt) * 5000; // 5s, 10s, 20s
+                logger.warn(`Rate limit hit, waiting ${waitTime/1000}s before retry...`);
+                await new Promise(resolve => setTimeout(resolve, waitTime));
+                continue;
+            }
+            
+            // Non-rate-limit error, throw immediately
+            throw error;
+        }
     }
+
+    logger.error('Failed to parse invoice after all retries', lastError);
+    throw lastError;
 }
 
 /**
