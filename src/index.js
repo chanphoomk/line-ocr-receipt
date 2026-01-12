@@ -8,7 +8,7 @@ const config = require('./config/env');
 const logger = require('./utils/logger');
 const { formatDateTime } = require('./utils/date');
 const lineService = require('./services/line');
-const ocrService = require('./services/ocr');
+const geminiService = require('./services/gemini');
 const driveService = require('./services/drive');
 const sheetsService = require('./services/sheets');
 const usageService = require('./services/usage');
@@ -132,12 +132,12 @@ async function handleEvent(event) {
         logger.info(`Downloading image: ${messageId}`);
         const imageBuffer = await lineService.downloadImage(messageId);
 
-        // Step 3: Process with Document AI
+        // Step 3: Process with Gemini AI (Vision)
         if (isVerbose) {
-            await lineService.pushText(userId, '🔍 Step 2/4: Processing with OCR...');
+            await lineService.pushText(userId, '🔍 Step 2/4: Processing with Gemini AI...');
         }
-        logger.info('Processing with OCR...');
-        const ocrData = await ocrService.processReceipt(imageBuffer, 'image/jpeg');
+        logger.info('Processing with Gemini AI...');
+        const ocrData = await geminiService.parseInvoice(imageBuffer, 'image/jpeg');
 
         // Step 3.5: Increment usage counter AFTER successful OCR
         await usageService.incrementUsage();
@@ -159,7 +159,7 @@ async function handleEvent(event) {
             await lineService.pushText(userId, '📊 Step 4/4: Saving to Google Sheets...');
         }
         logger.info('Saving to Google Sheets...');
-        const rows = ocrService.formatForSheets(ocrData, uploadResult.url, timestamp, userInfo);
+        const rows = geminiService.formatForSheets(ocrData, uploadResult.url, timestamp, userInfo);
         await sheetsService.appendRows(rows);
 
         // Step 6: Send success message with extracted data
@@ -262,6 +262,13 @@ function formatSuccessMessage(ocrData, imageUrl) {
     lines.push('');
     lines.push('📁 Image saved to Google Drive');
     lines.push('📊 Data logged to Google Sheets');
+    
+    // Show confidence score
+    if (ocrData.confidence !== undefined) {
+        const confidencePercent = Math.round(ocrData.confidence * 100);
+        const confidenceEmoji = confidencePercent >= 80 ? '🟢' : confidencePercent >= 60 ? '🟡' : '🔴';
+        lines.push(`${confidenceEmoji} Confidence: ${confidencePercent}%`);
+    }
 
     return lines.join('\n');
 }
