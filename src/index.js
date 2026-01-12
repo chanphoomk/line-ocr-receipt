@@ -429,6 +429,15 @@ async function handleTextMessage(event, userId) {
     const text = event.message.text.trim();
     const textLower = text.toLowerCase();
     
+    // Get my LINE User ID command
+    if (textLower === '/myid' || textLower === 'myid') {
+        await lineService.replyText(
+            event.replyToken,
+            `🆔 Your LINE User ID:\n\n${userId}\n\n📋 Copy this for admin setup.`
+        );
+        return;
+    }
+    
     // Usage check command
     if (textLower === '/usage' || textLower === 'usage' || textLower === 'quota') {
         const stats = await usageService.getUsageStats();
