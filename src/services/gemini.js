@@ -37,59 +37,92 @@ function getModelName() {
 
 /**
  * The invoice parsing prompt - instructs Gemini to extract structured data
+ * Output: 18 columns (A-R) for Google Sheets
  */
 const INVOICE_PROMPT = `You are a Thai invoice/receipt parser. Analyze this image and extract ALL data accurately.
 
 CRITICAL RULES:
-1. Count ALL line items including products, services, discounts, and credit notes
-2. Return EXACTLY that many items in lineItems array
-3. If an item spans multiple lines, combine them into one item
-4. INCLUDE discounts and credit notes - they are valid line items with negative amounts
-5. For Thai text, preserve the original Thai characters
-6. Calculate confidence based on image clarity and how certain you are
-7. For dates, use ISO format YYYY-MM-DD (e.g., "2026-01-11")
-8. Classify each line item type:
-   - "item" = regular product/service (positive amount)
-   - "discount" = ส่วนลด, promotion, discount (negative amount)
-   - "credit" = CN/Credit Note, refund, return (negative amount)
+1. Extract ALL line items including: products, services, discounts, service charges, and VAT
+2. SUM of all lineItems amounts MUST EQUAL grandTotal
+3. For Thai text, preserve the original Thai characters
+4. For dates, use ISO format YYYY-MM-DD (e.g., "2026-01-11")
 
-OUTPUT FORMAT - Return ONLY valid JSON, no markdown, no explanation:
+DOCUMENT TYPE - Classify the document:
+- "Tax Invoice" = ใบกำกับภาษี (has Tax ID, formal)
+- "Receipt" = ใบเสร็จรับเงิน (simple receipt)
+- "Credit Note" = ใบลดหนี้ (refund/return document)
+- "Quotation" = ใบเสนอราคา (not yet paid)
+
+EXPENSE CATEGORY - Suggest based on content:
+- "Food" = restaurants, cafes, groceries
+- "Travel" = transport, fuel, parking, hotels
+- "Office" = supplies, equipment, furniture
+- "Marketing" = advertising, promotions
+- "Utilities" = phone, internet, electricity
+- "Other" = if unsure
+
+LINE TYPE CLASSIFICATION:
+- "item" = regular product/service (positive amount)
+- "discount" = ส่วนลด, promotion, member discount (negative amount)
+- "credit" = CN/Credit Note, refund, return (negative amount)
+- "service" = Service charge, ค่าบริการ (positive amount)
+- "vat" = VAT 7%, ภาษีมูลค่าเพิ่ม (positive amount, only if shown as separate line)
+
+CALCULATION RULES:
+1. quantity: default to 1 if not shown
+2. unitPrice: price per unit
+3. amount: unitPrice × quantity (can be negative for discounts)
+4. SUM of all amounts = grandTotal
+
+OUTPUT FORMAT - Return ONLY valid JSON, no markdown:
 {
+  "documentType": "Tax Invoice | Receipt | Credit Note | Quotation",
   "invoiceNumber": "string or null",
-  "invoiceDate": "YYYY-MM-DD format or null",
+  "invoiceDate": "YYYY-MM-DD or null",
   "sellerName": "string or null",
-  "sellerTaxId": "string (13 digits) or null",
-  "sellerBranch": "string or null",
-  "buyerName": "string or null",
-  "buyerTaxId": "string or null",
+  "sellerTaxId": "13-digit string or null",
+  "expenseCategory": "Food | Travel | Office | Marketing | Utilities | Other",
   "lineItems": [
     {
-      "lineType": "item | discount | credit",
-      "description": "product/service/discount name",
-      "quantity": "number as string or null",
-      "unitPrice": "number or null",
-      "amount": "number (can be negative for discounts/credits)"
+      "lineType": "item | discount | credit | service | vat",
+      "description": "item name",
+      "quantity": 1,
+      "unitPrice": 100.00,
+      "amount": 100.00
     }
   ],
-  "subtotal": "number or null",
-  "vatAmount": "number or null",
-  "grandTotal": "number (required - net after all discounts)",
-  "confidence": "number 0.0-1.0 based on extraction certainty"
+  "subtotal": "number - sum of items only",
+  "vatAmount": "number - 0 if VAT is a line item",
+  "grandTotal": "number - must equal sum of all lineItems",
+  "confidence": "0.0-1.0"
 }
 
-EXAMPLES:
-- Regular product = { "lineType": "item", "description": "Massage 60 min", "amount": 1200 }
-- Discount line = { "lineType": "discount", "description": "ส่วนลด 10%", "amount": -120 }
-- Credit note = { "lineType": "credit", "description": "CN5302-00001", "amount": -97865.84 }
-- If document shows "DN" prefix = item, "CN" prefix = credit`;
+EXAMPLE:
+{
+  "documentType": "Receipt",
+  "invoiceNumber": "SMT006P1290016186",
+  "invoiceDate": "2026-01-11",
+  "sellerName": "SSamthing Together",
+  "sellerTaxId": "0107566000453",
+  "expenseCategory": "Food",
+  "lineItems": [
+    { "lineType": "item", "description": "Signature Set", "quantity": 1, "unitPrice": 699, "amount": 699 },
+    { "lineType": "discount", "description": "Member Discount", "quantity": 1, "unitPrice": -70, "amount": -70 },
+    { "lineType": "service", "description": "Service Charge 10%", "quantity": 1, "unitPrice": 143.80, "amount": 143.80 },
+    { "lineType": "vat", "description": "VAT 7%", "quantity": 1, "unitPrice": 110.73, "amount": 110.73 }
+  ],
+  "subtotal": 629,
+  "vatAmount": 0,
+  "grandTotal": 882.53,
+  "confidence": 0.92
+}`;
 
 /**
  * Required fields for JSON validation
  */
 const REQUIRED_FIELDS = ['grandTotal', 'confidence'];
-const OPTIONAL_FIELDS = ['invoiceNumber', 'invoiceDate', 'sellerName', 'sellerTaxId', 
-                          'sellerBranch', 'buyerName', 'buyerTaxId', 'lineItems', 
-                          'subtotal', 'vatAmount'];
+const OPTIONAL_FIELDS = ['documentType', 'invoiceNumber', 'invoiceDate', 'sellerName', 
+                          'sellerTaxId', 'expenseCategory', 'lineItems', 'subtotal', 'vatAmount'];
 
 /**
  * Validate JSON schema from Gemini response
@@ -252,20 +285,38 @@ function parseJsonResponse(text) {
 }
 
 /**
- * Normalize and validate invoice data
+ * Normalize and validate invoice data for 18-column layout
  */
 function normalizeInvoiceData(data) {
+    const lineItems = normalizeLineItems(data.lineItems || []);
+    
+    // Check if VAT is a separate line item
+    const hasVatLineItem = lineItems.some(item => item.lineType === 'vat');
+    
+    // Validate/default document type
+    const validDocTypes = ['Tax Invoice', 'Receipt', 'Credit Note', 'Quotation'];
+    let documentType = data.documentType || 'Receipt';
+    if (!validDocTypes.includes(documentType)) {
+        documentType = 'Receipt';
+    }
+    
+    // Validate/default expense category
+    const validCategories = ['Food', 'Travel', 'Office', 'Marketing', 'Utilities', 'Other'];
+    let expenseCategory = data.expenseCategory || 'Other';
+    if (!validCategories.includes(expenseCategory)) {
+        expenseCategory = 'Other';
+    }
+    
     return {
+        documentType: documentType,
         invoiceNumber: data.invoiceNumber || null,
         invoiceDate: normalizeDate(data.invoiceDate),
         sellerName: data.sellerName || null,
         sellerTaxId: extractTaxId(data.sellerTaxId),
-        sellerBranch: data.sellerBranch || null,
-        buyerName: data.buyerName || null,
-        buyerTaxId: extractTaxId(data.buyerTaxId),
-        lineItems: normalizeLineItems(data.lineItems || []),
+        expenseCategory: expenseCategory,
+        lineItems: lineItems,
         subtotal: parseNumber(data.subtotal),
-        vatAmount: parseNumber(data.vatAmount),
+        vatAmount: hasVatLineItem ? 0 : parseNumber(data.vatAmount),  // 0 if VAT is a line item
         grandTotal: parseNumber(data.grandTotal) || 0,
         confidence: Math.min(1, Math.max(0, parseFloat(data.confidence) || 0.5)),
     };
@@ -294,20 +345,44 @@ function normalizeDate(dateStr) {
 }
 
 /**
- * Normalize line items - includes discounts and credit notes
+ * Normalize line items - includes all types: item, discount, credit, service, vat
  */
 function normalizeLineItems(items) {
     if (!Array.isArray(items)) return [];
     
     return items.map((item, index) => {
-        const amount = parseNumber(item.amount) || 0;
+        const rawAmount = parseNumber(item.amount);
+        const rawUnitPrice = parseNumber(item.unitPrice);
+        const rawQuantity = parseNumber(item.quantity) || 1;  // Default qty to 1
+        
+        // Calculate missing values
+        let quantity = rawQuantity;
+        let unitPrice = rawUnitPrice;
+        let amount = rawAmount;
+        
+        // Fill in missing values based on what we have
+        if (amount !== null && unitPrice === null && quantity) {
+            // Have amount, missing unitPrice: calculate unitPrice = amount / quantity
+            unitPrice = amount / quantity;
+        } else if (unitPrice !== null && amount === null && quantity) {
+            // Have unitPrice, missing amount: calculate amount = unitPrice * quantity
+            amount = unitPrice * quantity;
+        } else if (unitPrice === null && amount === null) {
+            // Both missing, skip this item
+            amount = 0;
+        }
         
         // Determine line type (default to 'item' if not specified)
         let lineType = item.lineType?.toLowerCase() || 'item';
         
-        // Auto-detect type from amount if not specified
+        // Validate line type
+        const validTypes = ['item', 'discount', 'credit', 'service', 'vat'];
+        if (!validTypes.includes(lineType)) {
+            lineType = 'item';
+        }
+        
+        // Auto-detect type from amount and description if not specified correctly
         if (lineType === 'item' && amount < 0) {
-            // Check if description suggests credit or discount
             const desc = (item.description || '').toLowerCase();
             if (desc.includes('cn') || desc.includes('credit') || desc.includes('refund')) {
                 lineType = 'credit';
@@ -320,9 +395,9 @@ function normalizeLineItems(items) {
             itemNumber: index + 1,
             lineType: lineType,
             description: item.description || '',
-            quantity: item.quantity || null,
-            unitPrice: parseNumber(item.unitPrice),
-            amount: amount,
+            quantity: quantity,
+            unitPrice: unitPrice,
+            amount: amount || 0,
         };
     }).filter(item => item.description && item.amount !== 0);
 }
@@ -350,31 +425,27 @@ function parseNumber(value) {
 
 /**
  * Format parsed invoice data for Google Sheets
- * Column layout: A-H (header), I (item#), J (lineType), K (desc), L (qty), M (price), N (amount), O-V (totals)
+ * 18-column layout: A-R
  */
 function formatForSheets(data, imageUrl, timestamp, userInfo = {}) {
-    // Header data (columns A-H)
+    // Header data (columns A-G)
     const headerData = [
         timestamp,                          // A: Processed At
-        data.invoiceNumber || '',           // B: Invoice Number
-        data.invoiceDate || '',             // C: Invoice Date (now normalized)
-        data.sellerName || '',              // D: Seller Name
-        data.sellerTaxId || '',             // E: Seller Tax ID
-        data.sellerBranch || '',            // F: Seller Branch
-        data.buyerName || '',               // G: Buyer Name
-        data.buyerTaxId || '',              // H: Buyer Tax ID
+        data.invoiceDate || '',             // B: Invoice Date
+        data.invoiceNumber || '',           // C: Invoice Number
+        data.documentType || 'Receipt',     // D: Document Type
+        data.sellerName || '',              // E: Seller Name
+        data.sellerTaxId || '',             // F: Seller Tax ID
+        data.expenseCategory || 'Other',    // G: Expense Category
     ];
 
-    // Totals data (columns O-V)
+    // Totals data (columns N-R)
     const totalsData = [
-        data.subtotal || '',                // O: Subtotal
-        data.vatAmount || '',               // P: VAT 7%
-        data.grandTotal || '',              // Q: Grand Total
-        imageUrl || '',                     // R: Image URL
-        '',                                 // S: Status (for manual verification)
-        userInfo.userId || '',              // T: User ID
-        userInfo.displayName || '',         // U: User Name
-        data.confidence?.toFixed(2) || '',  // V: Confidence
+        data.subtotal || '',                // N: Subtotal
+        data.vatAmount || '',               // O: VAT 7%
+        data.grandTotal || '',              // P: Grand Total
+        imageUrl || '',                     // Q: Image URL
+        data.confidence?.toFixed(2) || '',  // R: Confidence
     ];
 
     const rows = [];
@@ -382,24 +453,24 @@ function formatForSheets(data, imageUrl, timestamp, userInfo = {}) {
     if (data.lineItems.length === 0) {
         rows.push([
             ...headerData,
-            '',                             // I: Item #
-            '',                             // J: Line Type
-            '',                             // K: Item Description
-            '',                             // L: Quantity
-            '',                             // M: Unit Price
-            '',                             // N: Line Amount
+            '',                             // H: Item #
+            '',                             // I: Line Type
+            '',                             // J: Description
+            '',                             // K: Quantity
+            '',                             // L: Unit Price
+            '',                             // M: Amount
             ...totalsData,
         ]);
     } else {
         data.lineItems.forEach(item => {
             rows.push([
                 ...headerData,
-                String(item.itemNumber),    // I: Item #
-                item.lineType || 'item',    // J: Line Type (item/discount/credit)
-                item.description || '',     // K: Item Description
-                item.quantity || '',        // L: Quantity
-                item.unitPrice || '',       // M: Unit Price
-                item.amount || '',          // N: Line Amount
+                String(item.itemNumber),    // H: Item #
+                item.lineType || 'item',    // I: Line Type
+                item.description || '',     // J: Description
+                item.quantity || 1,         // K: Quantity
+                item.unitPrice || '',       // L: Unit Price
+                item.amount || '',          // M: Amount
                 ...totalsData,
             ]);
         });
@@ -409,32 +480,28 @@ function formatForSheets(data, imageUrl, timestamp, userInfo = {}) {
 }
 
 /**
- * Get sheet headers (22 columns: A-V)
+ * Get sheet headers (18 columns: A-R)
  */
 function getSheetHeaders() {
     return [
         'Processed At',      // A
-        'Invoice Number',    // B
-        'Invoice Date',      // C
-        'Seller Name',       // D
-        'Seller Tax ID',     // E
-        'Seller Branch',     // F
-        'Buyer Name',        // G
-        'Buyer Tax ID',      // H
-        'Item #',            // I
-        'Line Type',         // J (NEW: item/discount/credit)
-        'Item Description',  // K
-        'Quantity',          // L
-        'Unit Price',        // M
-        'Line Amount',       // N
-        'Subtotal',          // O
-        'VAT 7%',            // P
-        'Grand Total',       // Q
-        'Image URL',         // R
-        'Status',            // S
-        'User ID',           // T
-        'User Name',         // U
-        'Confidence',        // V
+        'Invoice Date',      // B
+        'Invoice Number',    // C
+        'Document Type',     // D
+        'Seller Name',       // E
+        'Seller Tax ID',     // F
+        'Expense Category',  // G
+        'Item #',            // H
+        'Line Type',         // I
+        'Description',       // J
+        'Quantity',          // K
+        'Unit Price',        // L
+        'Amount',            // M (renamed from Line Amount)
+        'Subtotal',          // N
+        'VAT 7%',            // O
+        'Grand Total',       // P
+        'Image URL',         // Q
+        'Confidence',        // R
     ];
 }
 
