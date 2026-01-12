@@ -75,8 +75,8 @@ async function parseInvoice(imageBuffer, mimeType = 'image/jpeg') {
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
         try {
             const client = getClient();
-            // Use gemini-1.5-flash which has higher free tier limits (1500 RPD)
-            const model = client.getGenerativeModel({ model: 'gemini-1.5-flash' });
+            // Use gemini-2.5-flash - stable model with image input support
+            const model = client.getGenerativeModel({ model: 'gemini-2.5-flash' });
 
             logger.info(`Processing invoice with Gemini Vision (attempt ${attempt}/${maxRetries})...`);
 
