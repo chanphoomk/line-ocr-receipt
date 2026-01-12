@@ -244,6 +244,105 @@ function getUnauthorizedMessage() {
         '⚠️ You are not authorized to use this service.\n\nPlease contact admin for access.';
 }
 
+/**
+ * Get corp usage statistics
+ * Corps tab structure: Corp Name | Sheet ID | Drive Folder ID | Quota Limit | Status | Current Usage
+ * @param {string} corpName - Corporation name
+ * @returns {Object} Usage stats for the corp
+ */
+async function getCorpUsageStats(corpName) {
+    try {
+        const config = getConfigInfo();
+        if (!config.sheetId) {
+            return { used: 0, limit: 500, remaining: 500, percentUsed: 0 };
+        }
+        
+        const sheets = await getSheetsApi();
+        const range = `${config.corpsTab}!A:F`;
+        
+        const response = await sheets.spreadsheets.values.get({
+            spreadsheetId: config.sheetId,
+            range,
+        });
+
+        const rows = response.data.values || [];
+        
+        for (let i = 1; i < rows.length; i++) {
+            const row = rows[i];
+            if (row[0] === corpName) {
+                const limit = parseInt(row[3]) || 500;
+                const used = parseInt(row[5]) || 0;
+                const remaining = Math.max(0, limit - used);
+                const percentUsed = limit > 0 ? Math.round((used / limit) * 100) : 0;
+                
+                return {
+                    corpName,
+                    used,
+                    limit,
+                    remaining,
+                    percentUsed,
+                    isQuotaExceeded: used >= limit,
+                    rowIndex: i + 1,
+                };
+            }
+        }
+        
+        return { corpName, used: 0, limit: 500, remaining: 500, percentUsed: 0 };
+    } catch (error) {
+        logger.error('Error getting corp usage stats', { error: error.message });
+        return { used: 0, limit: 500, remaining: 500, percentUsed: 0 };
+    }
+}
+
+/**
+ * Increment corp usage counter
+ * @param {string} corpName - Corporation name
+ */
+async function incrementCorpUsage(corpName) {
+    try {
+        const stats = await getCorpUsageStats(corpName);
+        if (!stats.rowIndex) {
+            logger.warn('Corp not found for usage increment', { corpName });
+            return;
+        }
+        
+        const config = getConfigInfo();
+        const sheets = await getSheetsApi();
+        
+        const newUsage = (stats.used || 0) + 1;
+        
+        await sheets.spreadsheets.values.update({
+            spreadsheetId: config.sheetId,
+            range: `${config.corpsTab}!F${stats.rowIndex}`,
+            valueInputOption: 'USER_ENTERED',
+            requestBody: { values: [[newUsage]] },
+        });
+        
+        logger.info('Corp usage incremented', { corpName, newUsage });
+    } catch (error) {
+        logger.error('Error incrementing corp usage', { error: error.message });
+    }
+}
+
+/**
+ * Check if corp can use OCR (quota not exceeded)
+ * @param {string} corpName - Corporation name
+ * @returns {Object} { canUse, message, stats }
+ */
+async function checkCorpQuota(corpName) {
+    const stats = await getCorpUsageStats(corpName);
+    
+    if (stats.isQuotaExceeded) {
+        return {
+            canUse: false,
+            message: `Corp ${corpName} has reached its monthly quota (${stats.used}/${stats.limit})`,
+            stats,
+        };
+    }
+    
+    return { canUse: true, message: '', stats };
+}
+
 module.exports = {
     getUserByLineId,
     updateUser,
@@ -252,4 +351,7 @@ module.exports = {
     getAllCorps,
     isAdmin,
     getUnauthorizedMessage,
+    getCorpUsageStats,
+    incrementCorpUsage,
+    checkCorpQuota,
 };

@@ -116,19 +116,19 @@ async function handleEvent(event) {
             return;
         }
 
-        // Step 0b: Check OCR availability (quota limit)
-        const availability = await usageService.checkOCRAvailability();
+        // Step 0b: Check CORP quota (per-corp limit from config sheet)
+        const quotaCheck = await configService.checkCorpQuota(user.corp);
 
-        if (!availability.canUseOCR) {
-            // Quota exceeded - just return message and stop
-            logger.warn('OCR quota limit reached', {
-                count: availability.count,
-                limit: availability.limit,
+        if (!quotaCheck.canUse) {
+            logger.warn('Corp quota limit reached', {
+                corp: user.corp,
+                used: quotaCheck.stats.used,
+                limit: quotaCheck.stats.limit,
             });
 
             await lineService.replyText(
                 event.replyToken,
-                `⚠️ ${availability.message}`
+                `⚠️ ${quotaCheck.message}\n\nPlease contact admin to increase quota.`
             );
             return;
         }
@@ -137,9 +137,9 @@ async function handleEvent(event) {
         const isDebugMode = process.env.VERBOSE_DEBUG_MODE === 'true';
         const isReturnOutput = process.env.VERBOSE_RETURN_OUTPUT === 'true';
 
-        // Step 1: Send processing notification (always show quota in debug mode)
+        // Step 1: Send processing notification (show corp quota in debug mode)
         const processingMsg = isDebugMode 
-            ? `🔄 Processing your receipt image...\n🏢 Corp: ${user.corp}\n📊 Quota: ${availability.count + 1}/${availability.limit}`
+            ? `🔄 Processing your receipt image...\n🏢 Corp: ${user.corp}\n📊 Quota: ${quotaCheck.stats.used + 1}/${quotaCheck.stats.limit}`
             : '🔄 Processing your receipt image...';
         await lineService.replyText(event.replyToken, processingMsg);
 
@@ -161,8 +161,8 @@ async function handleEvent(event) {
         logger.info('Processing with Gemini AI...');
         const ocrData = await geminiService.parseInvoice(imageBuffer, 'image/jpeg');
 
-        // Step 3.5: Increment usage counter AFTER successful OCR
-        await usageService.incrementUsage();
+        // Step 3.5: Increment CORP usage counter AFTER successful OCR
+        await configService.incrementCorpUsage(user.corp);
 
         // Step 4: Upload to Google Drive (corp-specific folder)
         if (isDebugMode) {
@@ -414,6 +414,37 @@ async function handlePostbackEvent(event, userId) {
             return;
         }
         
+        // Handle corp change request (requires admin approval)
+        if (data.startsWith('changecorp_request=')) {
+            const newCorpName = data.replace('changecorp_request=', '');
+            
+            // Verify corp exists
+            const corpConfig = await configService.getCorpConfig(newCorpName);
+            if (!corpConfig) {
+                await lineService.replyText(
+                    event.replyToken,
+                    '❌ Invalid corporation. Please try again.'
+                );
+                return;
+            }
+            
+            // Get user and update status to pending_change
+            const user = await configService.getUserByLineId(userId);
+            if (user) {
+                // Store new corp request in a special format
+                await configService.updateUser(user.rowIndex, {
+                    ...user,
+                    status: `pending_change:${newCorpName}`,  // Admin sees this and approves
+                });
+                
+                await lineService.replyText(
+                    event.replyToken,
+                    `📝 Corp change request submitted!\n\n🏢 Current: ${user.corp}\n➡️ Requested: ${newCorpName}\n⏳ Status: Pending Approval\n\nPlease wait for admin to approve.`
+                );
+            }
+            return;
+        }
+        
         // Handle existing user corp change (by admin)
         if (data.startsWith('select_corp=')) {
             const corpName = data.replace('select_corp=', '');
@@ -458,6 +489,21 @@ async function handlePostbackEvent(event, userId) {
 async function handleTextMessage(event, userId) {
     const text = event.message.text.trim();
     const textLower = text.toLowerCase();
+    
+    // Help command - list all available commands
+    if (textLower === '/cmd' || textLower === 'cmd' || textLower === '/help' || textLower === 'help') {
+        const helpMessage = `📋 Available Commands:
+
+🆔 /myid - Get your LINE User ID
+📝 /register - Register for a corporation
+🔄 /changecorp - Request to change corporation
+📊 /usage - Check your OCR quota
+❓ /cmd - Show this help message
+
+📷 Or send a receipt image to process!`;
+        await lineService.replyText(event.replyToken, helpMessage);
+        return;
+    }
     
     // Get my LINE User ID command
     if (textLower === '/myid' || textLower === 'myid') {
@@ -520,11 +566,67 @@ async function handleTextMessage(event, userId) {
         return;
     }
     
+    // Change corp command - requires admin approval
+    if (textLower === '/changecorp' || textLower === 'changecorp') {
+        const existingUser = await configService.getUserByLineId(userId);
+        
+        if (!existingUser) {
+            await lineService.replyText(
+                event.replyToken,
+                '❌ You are not registered. Please use /register first.'
+            );
+            return;
+        }
+        
+        if (existingUser.status !== 'active') {
+            await lineService.replyText(
+                event.replyToken,
+                '⚠️ Your account is not active. Please contact admin.'
+            );
+            return;
+        }
+        
+        // Show corp selection
+        const corps = await configService.getAllCorps();
+        const otherCorps = corps.filter(c => c !== existingUser.corp);
+        
+        if (otherCorps.length === 0) {
+            await lineService.replyText(
+                event.replyToken,
+                '⚠️ No other corporations available.'
+            );
+            return;
+        }
+        
+        await lineService.replyWithQuickReply(
+            event.replyToken,
+            `🔄 Change from ${existingUser.corp} to:`,
+            otherCorps.map(corp => ({
+                type: 'action',
+                action: {
+                    type: 'postback',
+                    label: corp,
+                    data: `changecorp_request=${corp}`,
+                    displayText: corp,
+                }
+            }))
+        );
+        return;
+    }
+    
     // Usage check command
     if (textLower === '/usage' || textLower === 'usage' || textLower === 'quota') {
-        const stats = await usageService.getUsageStats();
-        const message = formatUsageMessage(stats);
-        await lineService.replyText(event.replyToken, message);
+        // Get user's corp for per-corp quota
+        const user = await configService.getUserByLineId(userId);
+        if (user && user.status === 'active' && user.corp) {
+            const corpStats = await configService.getCorpUsageStats(user.corp);
+            const message = formatCorpUsageMessage(corpStats, user.corp);
+            await lineService.replyText(event.replyToken, message);
+        } else {
+            const stats = await usageService.getUsageStats();
+            const message = formatUsageMessage(stats);
+            await lineService.replyText(event.replyToken, message);
+        }
         return;
     }
     
@@ -584,6 +686,29 @@ function formatUsageMessage(stats) {
     if (stats.isQuotaExceeded) {
         lines.push('');
         lines.push('⚠️ Quota exceeded - OCR paused until next month.');
+    }
+
+    return lines.join('\n');
+}
+
+/**
+ * Format corp usage statistics message
+ * @param {Object} stats - Corp usage statistics
+ * @param {string} corpName - Corporation name
+ * @returns {string} Formatted message
+ */
+function formatCorpUsageMessage(stats, corpName) {
+    const lines = [
+        `📊 ${corpName} OCR Usage`,
+        '',
+        `✅ Used: ${stats.used || 0}/${stats.limit || 500}`,
+        `📉 Remaining: ${stats.remaining || 500}`,
+        `📈 Usage: ${stats.percentUsed || 0}%`,
+    ];
+
+    if (stats.isQuotaExceeded) {
+        lines.push('');
+        lines.push('⚠️ Corp quota exceeded - Please contact admin.');
     }
 
     return lines.join('\n');
