@@ -1,6 +1,7 @@
 /**
  * Environment Configuration Loader
  * Loads and validates all required environment variables
+ * Updated for Multi-Corp system (no Document AI)
  */
 
 require('dotenv').config();
@@ -8,11 +9,11 @@ require('dotenv').config();
 const requiredEnvVars = [
   'LINE_CHANNEL_ACCESS_TOKEN',
   'LINE_CHANNEL_SECRET',
-  'GOOGLE_PROJECT_ID',
-  'GOOGLE_PROCESSOR_ID',
+  'GOOGLE_GEMINI_API_KEY',
   'GOOGLE_SERVICE_ACCOUNT_KEY',
-  'GOOGLE_DRIVE_FOLDER_ID',
-  'GOOGLE_SHEET_ID',
+  'GOOGLE_OAUTH_CLIENT_ID',
+  'GOOGLE_OAUTH_CLIENT_SECRET',
+  'GOOGLE_OAUTH_REFRESH_TOKEN',
 ];
 
 // Validate required environment variables
@@ -20,6 +21,13 @@ function validateEnv() {
   const missing = requiredEnvVars.filter((key) => !process.env[key]);
   if (missing.length > 0) {
     throw new Error(`Missing required environment variables: ${missing.join(', ')}`);
+  }
+  
+  // Warn about optional but recommended variables
+  const recommended = ['CONFIG_SHEET_ID', 'ADMIN_USER_IDS'];
+  const missingRecommended = recommended.filter((key) => !process.env[key]);
+  if (missingRecommended.length > 0) {
+    console.warn(`⚠️ Recommended environment variables not set: ${missingRecommended.join(', ')}`);
   }
 }
 
@@ -60,23 +68,33 @@ module.exports = {
     channelSecret: process.env.LINE_CHANNEL_SECRET,
   },
 
-  // Google Cloud Configuration
+  // Gemini AI Configuration
+  gemini: {
+    apiKey: process.env.GOOGLE_GEMINI_API_KEY,
+    model: process.env.GEMINI_MODEL || 'gemini-2.5-flash',
+  },
+
+  // Google Service Account (for Sheets access)
   google: {
-    projectId: process.env.GOOGLE_PROJECT_ID,
-    location: process.env.GOOGLE_LOCATION || 'us',
-    processorId: process.env.GOOGLE_PROCESSOR_ID,
     getCredentials: getServiceAccountCredentials,
   },
 
-  // Google Drive Configuration
+  // Google Drive Configuration (fallback - now uses config sheet per corp)
   drive: {
-    folderId: process.env.GOOGLE_DRIVE_FOLDER_ID,
+    folderId: process.env.GOOGLE_DRIVE_FOLDER_ID || null,
   },
 
-  // Google Sheets Configuration
+  // Google Sheets Configuration (fallback - now uses config sheet per corp)
   sheets: {
-    spreadsheetId: process.env.GOOGLE_SHEET_ID,
+    spreadsheetId: process.env.GOOGLE_SHEET_ID || null,
     sheetName: process.env.GOOGLE_SHEET_NAME || 'Sheet1',
+  },
+
+  // Multi-Corp Config
+  config: {
+    sheetId: process.env.CONFIG_SHEET_ID || null,
+    usersTab: process.env.CONFIG_USERS_TAB || 'users',
+    corpsTab: process.env.CONFIG_CORPS_TAB || 'corps',
   },
 
   // Server Configuration
