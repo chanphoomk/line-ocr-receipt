@@ -47,7 +47,7 @@ async function appendRows(rows, customSheetId = null, customSheetName = null) {
     const sheets = getClient();
     const spreadsheetId = customSheetId || config.sheets.spreadsheetId;
     const sheetName = customSheetName || config.sheets.sheetName || 'Sheet1';
-    const range = `${sheetName}!A:T`; // 20 columns: A-T
+    const range = `${sheetName}!A:V`; // 22 columns: A-V
 
     try {
         const response = await sheets.spreadsheets.values.append({
