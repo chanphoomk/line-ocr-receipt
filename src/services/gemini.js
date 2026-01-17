@@ -470,7 +470,7 @@ function generateReceiptId() {
 
 /**
  * Format parsed invoice data for Google Sheets
- * 24-column layout: A-X (added Additional VAT 7% and Total Inv VAT 7%)
+ * 22-column layout: A-V (Receipt ID, Invoice Month, Token Used)
  */
 function formatForSheets(data, imageUrl, timestamp, userInfo = {}) {
     // Generate unique Receipt ID
@@ -478,9 +478,6 @@ function formatForSheets(data, imageUrl, timestamp, userInfo = {}) {
     
     // Get invoice month YYYYMM
     const invoiceMonth = getInvoiceMonth(data.invoiceDate);
-    
-    // Check if VAT is present on the receipt
-    const hasVat = data.vatAmount && parseFloat(data.vatAmount) > 0;
     
     // Header data (columns A-I)
     const headerData = [
@@ -495,27 +492,20 @@ function formatForSheets(data, imageUrl, timestamp, userInfo = {}) {
         data.expenseCategory || 'Other',    // I: Expense Category
     ];
 
-    // Totals data (columns Q-X) - VAT columns will be inserted per line
-    const buildTotalsData = (additionalVat) => [
-        additionalVat,                       // Q: Additional VAT 7% (calculated)
-        hasVat ? data.vatAmount : '',        // R: Total Inv VAT 7% (from receipt)
-        data.grandTotal || '',               // S: Grand Total
-        imageUrl || '',                      // T: Image URL
-        data.confidence?.toFixed(2) || '',   // U: Confidence
-        data.tokenUsed || '',                // V: Token Used
-        userInfo.userId || '',               // W: User ID
-        userInfo.displayName || '',          // X: User Name
+    // Totals data (columns P-V)
+    const totalsData = [
+        data.subtotal || '',                // P: Subtotal
+        data.grandTotal || '',              // Q: Grand Total
+        imageUrl || '',                     // R: Image URL
+        data.confidence?.toFixed(2) || '',  // S: Confidence
+        data.tokenUsed || '',               // T: Token Used
+        userInfo.userId || '',              // U: User ID
+        userInfo.displayName || '',         // V: User Name
     ];
 
     const rows = [];
 
     if (data.lineItems.length === 0) {
-        // No line items - calculate VAT from subtotal if available
-        const subtotal = parseFloat(data.subtotal) || 0;
-        const additionalVat = hasVat && subtotal > 0 
-            ? (subtotal * 0.07).toFixed(2) 
-            : '';
-        
         rows.push([
             ...headerData,
             '',                             // J: Item #
@@ -524,17 +514,10 @@ function formatForSheets(data, imageUrl, timestamp, userInfo = {}) {
             '',                             // M: Quantity
             '',                             // N: Unit Price
             '',                             // O: Amount
-            data.subtotal || '',            // P: Subtotal
-            ...buildTotalsData(additionalVat),
+            ...totalsData,
         ]);
     } else {
         data.lineItems.forEach(item => {
-            // Calculate Additional VAT 7% per line item
-            const amount = parseFloat(item.amount) || 0;
-            const additionalVat = hasVat && amount > 0 
-                ? (amount * 0.07).toFixed(2) 
-                : '';
-            
             rows.push([
                 ...headerData,
                 String(item.itemNumber),    // J: Item #
@@ -543,8 +526,7 @@ function formatForSheets(data, imageUrl, timestamp, userInfo = {}) {
                 item.quantity || 1,         // M: Quantity
                 item.unitPrice || '',       // N: Unit Price
                 item.amount || '',          // O: Amount
-                data.subtotal || '',        // P: Subtotal
-                ...buildTotalsData(additionalVat),
+                ...totalsData,
             ]);
         });
     }
@@ -553,34 +535,32 @@ function formatForSheets(data, imageUrl, timestamp, userInfo = {}) {
 }
 
 /**
- * Get sheet headers (24 columns: A-X)
+ * Get sheet headers (22 columns: A-V)
  */
 function getSheetHeaders() {
     return [
-        'Processed At',         // A
-        'Receipt ID',           // B
-        'Invoice Date',         // C
-        'Invoice Month',        // D (YYYYMM)
-        'Invoice Number',       // E
-        'Document Type',        // F
-        'Seller Name',          // G
-        'Seller Tax ID',        // H
-        'Expense Category',     // I
-        'Item #',               // J
-        'Line Type',            // K
-        'Description',          // L
-        'Quantity',             // M
-        'Unit Price',           // N
-        'Amount',               // O
-        'Subtotal',             // P
-        'Additional VAT 7%',    // Q (calculated: Amount × 0.07)
-        'Total Inv VAT 7%',     // R (from receipt)
-        'Grand Total',          // S
-        'Image URL',            // T
-        'Confidence',           // U
-        'Token Used',           // V
-        'User ID',              // W
-        'User Name',            // X
+        'Processed At',      // A
+        'Receipt ID',        // B
+        'Invoice Date',      // C
+        'Invoice Month',     // D (YYYYMM)
+        'Invoice Number',    // E
+        'Document Type',     // F
+        'Seller Name',       // G
+        'Seller Tax ID',     // H
+        'Expense Category',  // I
+        'Item #',            // J
+        'Line Type',         // K
+        'Description',       // L
+        'Quantity',          // M
+        'Unit Price',        // N
+        'Amount',            // O
+        'Subtotal',          // P
+        'Grand Total',       // Q
+        'Image URL',         // R
+        'Confidence',        // S
+        'Token Used',        // T
+        'User ID',           // U
+        'User Name',         // V
     ];
 }
 
