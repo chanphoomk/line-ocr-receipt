@@ -222,15 +222,29 @@ async function processDocument(event, userId, docType) {
             ? formatSuccessMessage(ocrData, uploadResult.url)
             : '✅ Invoice processed and saved!';
         
-        // Try Reply first (saves push quota)
+        // Try Reply first (saves push quota), with proper error handling
+        let messageSent = false;
         try {
             await lineService.replyText(replyToken, successMessage);
             logger.info('Success message sent via REPLY (free)');
+            messageSent = true;
         } catch (replyError) {
             // Reply token expired (>30s), fallback to Push
-            logger.warn('Reply token expired, using Push fallback');
-            await lineService.pushText(userId, successMessage);
-            logger.info('Success message sent via PUSH (uses quota)');
+            logger.warn('Reply token expired, trying Push fallback', { error: replyError.message });
+            try {
+                await lineService.pushText(userId, successMessage);
+                logger.info('Success message sent via PUSH (uses quota)');
+                messageSent = true;
+            } catch (pushError) {
+                logger.error('Both Reply and Push failed', { 
+                    replyError: replyError.message, 
+                    pushError: pushError.message 
+                });
+            }
+        }
+        
+        if (!messageSent) {
+            logger.error('Could not send success message to user', { userId });
         }
 
         logger.info('Document processed successfully', {
@@ -241,6 +255,7 @@ async function processDocument(event, userId, docType) {
             total: ocrData.grandTotal,
             lineItems: ocrData.lineItems?.length || 0,
             user: userInfo.displayName || userInfo.userId,
+            messageSent,
         });
         
         // Clear retry cache on success
@@ -266,33 +281,22 @@ async function processDocument(event, userId, docType) {
             logger.info('Cached document for retry', { userId, messageId, docType });
         }
 
-        // Notify user of error with retry button
+        // Notify user of error - Try Reply first (FREE), then Push
+        const errorMessage = `❌ ไม่สามารถประมวลผลได้\n\nError: ${error.message}\n\n💡 ส่งรูปใหม่เพื่อลองอีกครั้ง`;
+        
         try {
-            await lineService.replyWithQuickReply(
-                null, // No replyToken available in push context
-                `❌ ไม่สามารถประมวลผลใบเสร็จได้\n\nError: ${error.message}\n\n💡 กด Retry เพื่อลองใหม่`,
-                [
-                    {
-                        type: 'action',
-                        action: {
-                            type: 'postback',
-                            label: '🔄 Retry',
-                            data: 'retry_ocr',
-                            displayText: '🔄 Retry OCR',
-                        }
-                    }
-                ],
-                userId  // Use push instead of reply
-            );
-        } catch (notifyError) {
-            // Fallback to simple text if Quick Reply fails
+            await lineService.replyText(replyToken, errorMessage);
+            logger.info('Error message sent via REPLY (free)');
+        } catch (replyError) {
+            // Reply failed, try Push
             try {
-                await lineService.pushText(
-                    userId,
-                    `❌ Sorry, I couldn't process your receipt.\n\nError: ${error.message}\n\n💡 Send the image again to retry.`
-                );
-            } catch (fallbackError) {
-                logger.error('Failed to notify user of error', fallbackError);
+                await lineService.pushText(userId, errorMessage);
+                logger.info('Error message sent via PUSH');
+            } catch (pushError) {
+                logger.error('Failed to notify user of error', { 
+                    replyError: replyError.message, 
+                    pushError: pushError.message 
+                });
             }
         }
     }
