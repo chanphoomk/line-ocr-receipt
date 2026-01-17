@@ -1,7 +1,6 @@
 /**
  * Environment Configuration Loader
- * Loads and validates all required environment variables
- * Updated for Multi-Corp system (no Document AI)
+ * Single-Corp Version - Simple deployment
  */
 
 require('dotenv').config();
@@ -14,6 +13,8 @@ const requiredEnvVars = [
   'GOOGLE_OAUTH_CLIENT_ID',
   'GOOGLE_OAUTH_CLIENT_SECRET',
   'GOOGLE_OAUTH_REFRESH_TOKEN',
+  'GOOGLE_SHEET_ID',
+  'GOOGLE_DRIVE_FOLDER_ID',
 ];
 
 // Validate required environment variables
@@ -21,13 +22,6 @@ function validateEnv() {
   const missing = requiredEnvVars.filter((key) => !process.env[key]);
   if (missing.length > 0) {
     throw new Error(`Missing required environment variables: ${missing.join(', ')}`);
-  }
-  
-  // Warn about optional but recommended variables
-  const recommended = ['CONFIG_SHEET_ID', 'ADMIN_USER_IDS'];
-  const missingRecommended = recommended.filter((key) => !process.env[key]);
-  if (missingRecommended.length > 0) {
-    console.warn(`⚠️ Recommended environment variables not set: ${missingRecommended.join(', ')}`);
   }
 }
 
@@ -79,31 +73,28 @@ module.exports = {
     getCredentials: getServiceAccountCredentials,
   },
 
-  // Google Drive Configuration (fallback - now uses config sheet per corp)
+  // Google Drive Configuration
   drive: {
-    folderId: process.env.GOOGLE_DRIVE_FOLDER_ID || null,
+    folderId: process.env.GOOGLE_DRIVE_FOLDER_ID,
   },
 
-  // Google Sheets Configuration (fallback - now uses config sheet per corp)
+  // Google Sheets Configuration
   sheets: {
-    spreadsheetId: process.env.GOOGLE_SHEET_ID || null,
+    spreadsheetId: process.env.GOOGLE_SHEET_ID,
     sheetName: process.env.GOOGLE_SHEET_NAME || 'Sheet1',
   },
 
-  // Multi-Corp Config
-  config: {
-    sheetId: process.env.CONFIG_SHEET_ID || null,
-    usersTab: process.env.CONFIG_USERS_TAB || 'users',
-    corpsTab: process.env.CONFIG_CORPS_TAB || 'corps',
+  // OCR Quota Configuration
+  ocr: {
+    monthlyLimit: parseInt(process.env.OCR_MONTHLY_LIMIT) || 500,
+    quotaMessage: process.env.OCR_QUOTA_MESSAGE || 'Monthly OCR quota exceeded. Please try again next month.',
   },
 
   // Server Configuration
   server: {
-    port: parseInt(process.env.PORT, 10) || 3000,
+    port: parseInt(process.env.PORT) || 3000,
     nodeEnv: process.env.NODE_ENV || 'development',
   },
 
-  // Utility functions
   validateEnv,
-  getServiceAccountCredentials,
 };

@@ -1,6 +1,6 @@
 /**
  * LINE OCR Receipt Processor
- * Main server entry point - Multi-Corp Version
+ * Single-Corp Version - Simple deployment for single customer
  */
 
 const express = require('express');
@@ -12,7 +12,6 @@ const geminiService = require('./services/gemini');
 const driveService = require('./services/drive');
 const sheetsService = require('./services/sheets');
 const usageService = require('./services/usage');
-const configService = require('./services/configService');
 
 const app = express();
 
@@ -74,12 +73,6 @@ async function handleEvent(event) {
         return;
     }
 
-    // Handle postback (Quick Reply selections)
-    if (event.type === 'postback') {
-        await handlePostbackEvent(event, userId);
-        return;
-    }
-
     // Handle text messages - check for commands
     if (event.type === 'message' && event.message?.type === 'text') {
         await handleTextMessage(event, userId);
@@ -91,44 +84,23 @@ async function handleEvent(event) {
         return;
     }
 
-    // Process image - userId already declared above
+    // Process image
     const messageId = event.message.id;
     const timestamp = formatDateTime();
 
     try {
-        // Step 0a: Check user authorization and get corp config
-        const user = await configService.getUserByLineId(userId);
-        if (!user || user.status !== 'active' || !user.corp) {
-            await lineService.replyText(
-                event.replyToken,
-                configService.getUnauthorizedMessage()
-            );
-            return;
-        }
+        // Step 0: Check OCR availability (global quota limit)
+        const availability = await usageService.checkOCRAvailability();
 
-        // Get corp configuration for routing
-        const corpConfig = await configService.getCorpConfig(user.corp);
-        if (!corpConfig || corpConfig.status !== 'active') {
-            await lineService.replyText(
-                event.replyToken,
-                '⚠️ Your corporation is not active. Please contact admin.'
-            );
-            return;
-        }
-
-        // Step 0b: Check CORP quota (per-corp limit from config sheet)
-        const quotaCheck = await configService.checkCorpQuota(user.corp);
-
-        if (!quotaCheck.canUse) {
-            logger.warn('Corp quota limit reached', {
-                corp: user.corp,
-                used: quotaCheck.stats.used,
-                limit: quotaCheck.stats.limit,
+        if (!availability.canUseOCR) {
+            logger.warn('OCR quota limit reached', {
+                count: availability.count,
+                limit: availability.limit,
             });
 
             await lineService.replyText(
                 event.replyToken,
-                `⚠️ ${quotaCheck.message}\n\nPlease contact admin to increase quota.`
+                `⚠️ ${availability.message}`
             );
             return;
         }
@@ -137,9 +109,9 @@ async function handleEvent(event) {
         const isDebugMode = process.env.VERBOSE_DEBUG_MODE === 'true';
         const isReturnOutput = process.env.VERBOSE_RETURN_OUTPUT === 'true';
 
-        // Step 1: Send processing notification (show corp quota in debug mode)
+        // Step 1: Send processing notification
         const processingMsg = isDebugMode 
-            ? `🔄 Processing your receipt image...\n🏢 Corp: ${user.corp}\n📊 Quota: ${quotaCheck.stats.used + 1}/${quotaCheck.stats.limit}`
+            ? `🔄 Processing your receipt image...\n📊 Quota: ${availability.count + 1}/${availability.limit}`
             : '🔄 Processing your receipt image...';
         await lineService.replyText(event.replyToken, processingMsg);
 
@@ -161,29 +133,28 @@ async function handleEvent(event) {
         logger.info('Processing with Gemini AI...');
         const ocrData = await geminiService.parseInvoice(imageBuffer, 'image/jpeg');
 
-        // Step 3.5: Increment CORP usage counter AFTER successful OCR
-        await configService.incrementCorpUsage(user.corp);
+        // Step 3.5: Increment usage counter AFTER successful OCR
+        await usageService.incrementUsage();
 
-        // Step 4: Upload to Google Drive (corp-specific folder)
+        // Step 4: Upload to Google Drive
         if (isDebugMode) {
             await lineService.pushText(userId, '📁 Step 3/4: Uploading to Google Drive...');
         }
-        logger.info(`Uploading to Google Drive (${user.corp})...`);
-        const fileName = `${user.corp}_receipt_${messageId}_${Date.now()}.jpg`;
+        logger.info('Uploading to Google Drive...');
+        const fileName = `receipt_${messageId}_${Date.now()}.jpg`;
         const uploadResult = await driveService.uploadImage(
             imageBuffer,
             fileName,
-            'image/jpeg',
-            corpConfig.driveFolderId  // Use corp-specific folder
+            'image/jpeg'
         );
 
-        // Step 5: Append to Google Sheets (corp-specific sheet and tab)
+        // Step 5: Append to Google Sheets
         if (isDebugMode) {
             await lineService.pushText(userId, '📊 Step 4/4: Saving to Google Sheets...');
         }
-        logger.info(`Saving to Google Sheets (${user.corp}/${corpConfig.sheetName})...`);
+        logger.info('Saving to Google Sheets...');
         const rows = geminiService.formatForSheets(ocrData, uploadResult.url, timestamp, userInfo);
-        await sheetsService.appendRows(rows, corpConfig.sheetId, corpConfig.sheetName);  // Use corp-specific sheet + tab
+        await sheetsService.appendRows(rows);
 
         // Step 6: Send success message with extracted data (only if RETURN_OUTPUT is true)
         if (isReturnOutput) {
@@ -247,18 +218,6 @@ function formatSuccessMessage(ocrData, imageUrl) {
     if (ocrData.sellerTaxId) {
         lines.push(`🏷️ Tax ID: ${ocrData.sellerTaxId}`);
     }
-    if (ocrData.sellerBranch) {
-        lines.push(`📍 สาขา: ${ocrData.sellerBranch}`);
-    }
-
-    // Buyer info (if exists)
-    if (ocrData.buyerName) {
-        lines.push('');
-        lines.push(`👤 ผู้ซื้อ: ${ocrData.buyerName}`);
-        if (ocrData.buyerTaxId) {
-            lines.push(`🏷️ Tax ID ผู้ซื้อ: ${ocrData.buyerTaxId}`);
-        }
-    }
 
     // Line items
     if (ocrData.lineItems && ocrData.lineItems.length > 0) {
@@ -303,188 +262,25 @@ function formatSuccessMessage(ocrData, imageUrl) {
 
 /**
  * Handle follow event - user adds bot as friend
- * Self-registration flow: Show corp selection, add to sheet as pending
+ * Simple welcome message for single-corp version
  */
 async function handleFollowEvent(event, userId) {
     logger.info('New user follow', { userId });
     
     try {
-        // Get user profile
         const profile = await lineService.getUserProfile(userId);
         
-        // Check if user already exists
-        const existingUser = await configService.getUserByLineId(userId);
-        
-        if (existingUser) {
-            if (existingUser.status === 'active') {
-                await lineService.replyText(
-                    event.replyToken,
-                    `👋 Welcome back ${profile.displayName || 'User'}!\n\n📷 Send me a receipt image to process.\n🏢 Your corp: ${existingUser.corp}`
-                );
-            } else if (existingUser.status === 'pending') {
-                await lineService.replyText(
-                    event.replyToken,
-                    `⏳ Hi ${profile.displayName || 'User'}!\n\nYour registration is pending approval.\nPlease wait for admin to activate your account.`
-                );
-            } else {
-                await lineService.replyText(
-                    event.replyToken,
-                    '⚠️ Your account is not active. Please contact admin.'
-                );
-            }
-            return;
-        }
-        
-        // New user - show corp selection
-        const corps = await configService.getAllCorps();
-        
-        if (corps.length === 0) {
-            await lineService.replyText(
-                event.replyToken,
-                '⚠️ No corporations configured. Please contact admin.'
-            );
-            return;
-        }
-        
-        // Send Quick Reply for corp selection
-        await lineService.replyWithQuickReply(
+        await lineService.replyText(
             event.replyToken,
-            `👋 Welcome ${profile.displayName || 'User'}!\n\n📋 Please select your corporation to register:`,
-            corps.map(corp => ({
-                type: 'action',
-                action: {
-                    type: 'postback',
-                    label: corp,
-                    data: `register_corp=${corp}`,
-                    displayText: corp,
-                }
-            }))
+            `👋 Welcome ${profile.displayName || 'User'}!\n\n📷 ส่งรูปใบเสร็จ/ใบกำกับภาษี\n✅ ระบบจะบันทึกข้อมูลให้อัตโนมัติ\n\n💡 พิมพ์ /cmd หรือ help เพื่อดูคำสั่งทั้งหมด`
         );
     } catch (error) {
         logger.error('Error handling follow event', { error: error.message });
-        await lineService.replyText(
-            event.replyToken,
-            '❌ Error processing your request. Please try again.'
-        );
     }
 }
 
 /**
- * Handle postback event - Quick Reply selections
- */
-async function handlePostbackEvent(event, userId) {
-    const data = event.postback?.data || '';
-    logger.info('Postback received', { userId, data });
-    
-    try {
-        // Handle NEW user registration (add to sheet with pending status)
-        if (data.startsWith('register_corp=')) {
-            const corpName = data.replace('register_corp=', '');
-            
-            // Verify corp exists
-            const corpConfig = await configService.getCorpConfig(corpName);
-            if (!corpConfig) {
-                await lineService.replyText(
-                    event.replyToken,
-                    '❌ Invalid corporation. Please try again.'
-                );
-                return;
-            }
-            
-            // Get user profile
-            const profile = await lineService.getUserProfile(userId);
-            
-            // Add user to config sheet with PENDING status
-            await configService.addUser(userId, profile.displayName || '');
-            
-            // Update the user with corp (still pending)
-            const user = await configService.getUserByLineId(userId);
-            if (user) {
-                await configService.updateUser(user.rowIndex, {
-                    ...user,
-                    corp: corpName,
-                    status: 'pending',  // Admin must activate
-                });
-            }
-            
-            await lineService.replyText(
-                event.replyToken,
-                `✅ Registration submitted!\n\n🏢 Corporation: ${corpName}\n⏳ Status: Pending Approval\n\nPlease wait for admin to activate your account.`
-            );
-            return;
-        }
-        
-        // Handle corp change request (requires admin approval)
-        if (data.startsWith('changecorp_request=')) {
-            const newCorpName = data.replace('changecorp_request=', '');
-            
-            // Verify corp exists
-            const corpConfig = await configService.getCorpConfig(newCorpName);
-            if (!corpConfig) {
-                await lineService.replyText(
-                    event.replyToken,
-                    '❌ Invalid corporation. Please try again.'
-                );
-                return;
-            }
-            
-            // Get user and update status to pending_change
-            const user = await configService.getUserByLineId(userId);
-            if (user) {
-                // Store new corp request in a special format
-                await configService.updateUser(user.rowIndex, {
-                    ...user,
-                    status: `pending_change:${newCorpName}`,  // Admin sees this and approves
-                });
-                
-                await lineService.replyText(
-                    event.replyToken,
-                    `📝 Corp change request submitted!\n\n🏢 Current: ${user.corp}\n➡️ Requested: ${newCorpName}\n⏳ Status: Pending Approval\n\nPlease wait for admin to approve.`
-                );
-            }
-            return;
-        }
-        
-        // Handle existing user corp change (by admin)
-        if (data.startsWith('select_corp=')) {
-            const corpName = data.replace('select_corp=', '');
-            
-            // Verify corp exists
-            const corpConfig = await configService.getCorpConfig(corpName);
-            if (!corpConfig) {
-                await lineService.replyText(
-                    event.replyToken,
-                    '❌ Invalid corporation. Please try again.'
-                );
-                return;
-            }
-            
-            // Get user and update
-            const user = await configService.getUserByLineId(userId);
-            if (user) {
-                await configService.updateUser(user.rowIndex, {
-                    ...user,
-                    corp: corpName,
-                    status: 'active',
-                });
-                
-                await lineService.replyText(
-                    event.replyToken,
-                    `✅ Corporation changed to ${corpName}!\n\n📷 Send me a receipt image to get started.`
-                );
-            }
-        }
-    } catch (error) {
-        logger.error('Error handling postback', { error: error.message });
-        await lineService.replyText(
-            event.replyToken,
-            '❌ Error processing your selection. Please try again.'
-        );
-    }
-}
-
-/**
- * Handle text messages - commands and admin actions
+ * Handle text messages - commands
  */
 async function handleTextMessage(event, userId) {
     const text = event.message.text.trim();
@@ -495,9 +291,7 @@ async function handleTextMessage(event, userId) {
         const helpMessage = `📋 Available Commands:
 
 🆔 /myid - Get your LINE User ID
-📝 /register - Register for a corporation
-🔄 /changecorp - Request to change corporation
-📊 /usage - Check your OCR quota
+📊 /usage - Check OCR quota
 ❓ /cmd - Show this help message
 
 📷 Or send a receipt image to process!`;
@@ -509,162 +303,23 @@ async function handleTextMessage(event, userId) {
     if (textLower === '/myid' || textLower === 'myid') {
         await lineService.replyText(
             event.replyToken,
-            `🆔 Your LINE User ID:\n\n${userId}\n\n📋 Copy this for admin setup.`
-        );
-        return;
-    }
-    
-    // Register command for existing friends
-    if (textLower === '/register' || textLower === 'register') {
-        // Check if user already exists
-        const existingUser = await configService.getUserByLineId(userId);
-        
-        if (existingUser) {
-            if (existingUser.status === 'active') {
-                await lineService.replyText(
-                    event.replyToken,
-                    `✅ You're already registered!\n\n🏢 Corp: ${existingUser.corp}\n📷 Send me a receipt image to process.`
-                );
-            } else if (existingUser.status === 'pending') {
-                await lineService.replyText(
-                    event.replyToken,
-                    `⏳ Your registration is pending approval.\nPlease wait for admin to activate your account.`
-                );
-            } else {
-                await lineService.replyText(
-                    event.replyToken,
-                    '⚠️ Your account is not active. Please contact admin.'
-                );
-            }
-            return;
-        }
-        
-        // Show corp selection for new user
-        const corps = await configService.getAllCorps();
-        
-        if (corps.length === 0) {
-            await lineService.replyText(
-                event.replyToken,
-                '⚠️ No corporations configured. Please contact admin.'
-            );
-            return;
-        }
-        
-        await lineService.replyWithQuickReply(
-            event.replyToken,
-            '📋 Please select your corporation to register:',
-            corps.map(corp => ({
-                type: 'action',
-                action: {
-                    type: 'postback',
-                    label: corp,
-                    data: `register_corp=${corp}`,
-                    displayText: corp,
-                }
-            }))
-        );
-        return;
-    }
-    
-    // Change corp command - requires admin approval
-    if (textLower === '/changecorp' || textLower === 'changecorp') {
-        const existingUser = await configService.getUserByLineId(userId);
-        
-        if (!existingUser) {
-            await lineService.replyText(
-                event.replyToken,
-                '❌ You are not registered. Please use /register first.'
-            );
-            return;
-        }
-        
-        if (existingUser.status !== 'active') {
-            await lineService.replyText(
-                event.replyToken,
-                '⚠️ Your account is not active. Please contact admin.'
-            );
-            return;
-        }
-        
-        // Show corp selection
-        const corps = await configService.getAllCorps();
-        const otherCorps = corps.filter(c => c !== existingUser.corp);
-        
-        if (otherCorps.length === 0) {
-            await lineService.replyText(
-                event.replyToken,
-                '⚠️ No other corporations available.'
-            );
-            return;
-        }
-        
-        await lineService.replyWithQuickReply(
-            event.replyToken,
-            `🔄 Change from ${existingUser.corp} to:`,
-            otherCorps.map(corp => ({
-                type: 'action',
-                action: {
-                    type: 'postback',
-                    label: corp,
-                    data: `changecorp_request=${corp}`,
-                    displayText: corp,
-                }
-            }))
+            `🆔 Your LINE User ID:\n\n${userId}\n\n📋 Copy this for reference.`
         );
         return;
     }
     
     // Usage check command
     if (textLower === '/usage' || textLower === 'usage' || textLower === 'quota') {
-        // Get user's corp for per-corp quota
-        const user = await configService.getUserByLineId(userId);
-        if (user && user.status === 'active' && user.corp) {
-            const corpStats = await configService.getCorpUsageStats(user.corp);
-            const message = formatCorpUsageMessage(corpStats, user.corp);
-            await lineService.replyText(event.replyToken, message);
-        } else {
-            const stats = await usageService.getUsageStats();
-            const message = formatUsageMessage(stats);
-            await lineService.replyText(event.replyToken, message);
-        }
+        const stats = await usageService.getUsageStats();
+        const message = formatUsageMessage(stats);
+        await lineService.replyText(event.replyToken, message);
         return;
     }
     
-    // Admin change corp command
-    const adminCommand = process.env.ADMIN_CHANGE_COMMAND || 'ADMIN change corp';
-    if (text === adminCommand && configService.isAdmin(userId)) {
-        // Show corp selection for admin
-        const corps = await configService.getAllCorps();
-        await lineService.replyWithQuickReply(
-            event.replyToken,
-            '🔧 Admin: Select new corporation:',
-            corps.map(corp => ({
-                type: 'action',
-                action: {
-                    type: 'postback',
-                    label: corp,
-                    data: `select_corp=${corp}`,
-                    displayText: corp,
-                }
-            }))
-        );
-        return;
-    }
-    
-    // Check if user is authorized
-    const user = await configService.getUserByLineId(userId);
-    if (!user || user.status !== 'active') {
-        await lineService.replyText(
-            event.replyToken,
-            configService.getUnauthorizedMessage()
-        );
-        return;
-    }
-    
-    // Default response for text messages
+    // Unknown text - prompt to send image
     await lineService.replyText(
         event.replyToken,
-        `📷 Please send me an image of a receipt or invoice to process.\n\n🏢 Your corp: ${user.corp}\n\nType "usage" to check your monthly quota.`
+        '📷 Please send me a receipt/invoice image to process.\n\n💡 Type /cmd for help.'
     );
 }
 
@@ -686,29 +341,6 @@ function formatUsageMessage(stats) {
     if (stats.isQuotaExceeded) {
         lines.push('');
         lines.push('⚠️ Quota exceeded - OCR paused until next month.');
-    }
-
-    return lines.join('\n');
-}
-
-/**
- * Format corp usage statistics message
- * @param {Object} stats - Corp usage statistics
- * @param {string} corpName - Corporation name
- * @returns {string} Formatted message
- */
-function formatCorpUsageMessage(stats, corpName) {
-    const lines = [
-        `📊 ${corpName} OCR Usage`,
-        '',
-        `✅ Used: ${stats.used || 0}/${stats.limit || 500}`,
-        `📉 Remaining: ${stats.remaining || 500}`,
-        `📈 Usage: ${stats.percentUsed || 0}%`,
-    ];
-
-    if (stats.isQuotaExceeded) {
-        lines.push('');
-        lines.push('⚠️ Corp quota exceeded - Please contact admin.');
     }
 
     return lines.join('\n');
@@ -747,26 +379,18 @@ async function startServer() {
             logger.warn('Could not initialize usage sheet', error.message);
         }
 
-        // Log initial usage stats
-        try {
-            const stats = await usageService.getUsageStats();
-            logger.info(`📊 Current usage: ${stats.used}/${stats.limit} (${stats.monthDisplay})`);
-        } catch (error) {
-            logger.warn('Could not get initial usage stats', error.message);
-        }
-
         // Start server
-        app.listen(config.server.port, () => {
-            logger.info(`🚀 Server started on port ${config.server.port}`);
-            logger.info(`📍 Environment: ${config.server.nodeEnv}`);
-            logger.info(`🔗 Webhook URL: https://YOUR_DOMAIN/webhook`);
+        const port = config.server.port;
+        app.listen(port, () => {
+            logger.info(`Server started on port ${port}`);
+            logger.info(`Environment: ${config.server.nodeEnv}`);
+            logger.info('Single-Corp OCR Bot ready!');
         });
+
     } catch (error) {
-        logger.error('Failed to start server', error);
+        logger.error('Server startup failed', error);
         process.exit(1);
     }
 }
 
 startServer();
-
-module.exports = app;
