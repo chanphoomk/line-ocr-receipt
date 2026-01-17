@@ -114,23 +114,38 @@ async function getUserProfile(userId) {
 
 /**
  * Reply with Quick Reply buttons
- * @param {string} replyToken - Reply token from webhook event
+ * @param {string} replyToken - Reply token from webhook event (null for push mode)
  * @param {string} text - Message text to show
  * @param {Array} items - Quick Reply items array
+ * @param {string} userId - User ID (for push mode when replyToken is null)
  */
-async function replyWithQuickReply(replyToken, text, items) {
+async function replyWithQuickReply(replyToken, text, items, userId = null) {
+    const message = {
+        type: 'text',
+        text,
+        quickReply: {
+            items: items.slice(0, 13), // LINE limits to 13 items
+        },
+    };
+    
     try {
-        await client.replyMessage({
-            replyToken,
-            messages: [{
-                type: 'text',
-                text,
-                quickReply: {
-                    items: items.slice(0, 13), // LINE limits to 13 items
-                },
-            }],
-        });
-        logger.debug(`Replied with Quick Reply: ${items.length} options`);
+        if (replyToken) {
+            // Use reply mode
+            await client.replyMessage({
+                replyToken,
+                messages: [message],
+            });
+            logger.debug(`Replied with Quick Reply: ${items.length} options`);
+        } else if (userId) {
+            // Use push mode
+            await client.pushMessage({
+                to: userId,
+                messages: [message],
+            });
+            logger.debug(`Pushed Quick Reply to ${userId}: ${items.length} options`);
+        } else {
+            throw new Error('Either replyToken or userId is required');
+        }
     } catch (error) {
         logger.error('Failed to send Quick Reply', error);
         throw error;

@@ -15,6 +15,26 @@ const usageService = require('./services/usage');
 
 const app = express();
 
+// In-memory cache for retry (stores last failed image per user)
+// Format: { [userId]: { imageBuffer, messageId, timestamp } }
+const retryCache = new Map();
+const RETRY_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+
+/**
+ * Clean up expired retry cache entries
+ */
+function cleanupRetryCache() {
+    const now = Date.now();
+    for (const [userId, data] of retryCache.entries()) {
+        if (now - data.timestamp > RETRY_CACHE_TTL) {
+            retryCache.delete(userId);
+        }
+    }
+}
+
+// Clean up cache every minute
+setInterval(cleanupRetryCache, 60 * 1000);
+
 // Health check endpoint (before LINE middleware) - MUST be simple and fast
 app.get('/health', (req, res) => {
     res.json({
@@ -70,6 +90,12 @@ async function handleEvent(event) {
     // Handle follow event (user adds bot as friend)
     if (event.type === 'follow') {
         await handleFollowEvent(event, userId);
+        return;
+    }
+
+    // Handle postback (retry button)
+    if (event.type === 'postback') {
+        await handlePostbackEvent(event, userId);
         return;
     }
 
@@ -173,6 +199,9 @@ async function handleEvent(event) {
             lineItems: ocrData.lineItems?.length || 0,
             user: userInfo.displayName || userInfo.userId,
         });
+        
+        // Clear retry cache on success
+        retryCache.delete(userId);
 
     } catch (error) {
         logger.error('Failed to process receipt', {
@@ -181,16 +210,128 @@ async function handleEvent(event) {
             stack: error.stack,
         });
 
-        // Notify user of error
+        // Cache the image for retry (only if we have the buffer)
+        if (imageBuffer) {
+            retryCache.set(userId, {
+                imageBuffer,
+                messageId,
+                timestamp: Date.now(),
+            });
+            logger.info('Cached image for retry', { userId, messageId });
+        }
+
+        // Notify user of error with retry button
         try {
-            await lineService.pushText(
-                userId,
-                `❌ Sorry, I couldn't process your receipt.\n\nError: ${error.message}\n\nPlease try again with a clearer image.`
+            await lineService.replyWithQuickReply(
+                null, // No replyToken available in push context
+                `❌ ไม่สามารถประมวลผลใบเสร็จได้\n\nError: ${error.message}\n\n💡 กด Retry เพื่อลองใหม่`,
+                [
+                    {
+                        type: 'action',
+                        action: {
+                            type: 'postback',
+                            label: '🔄 Retry',
+                            data: 'retry_ocr',
+                            displayText: '🔄 Retry OCR',
+                        }
+                    }
+                ],
+                userId  // Use push instead of reply
             );
         } catch (notifyError) {
-            logger.error('Failed to notify user of error', notifyError);
+            // Fallback to simple text if Quick Reply fails
+            try {
+                await lineService.pushText(
+                    userId,
+                    `❌ Sorry, I couldn't process your receipt.\n\nError: ${error.message}\n\n💡 Send the image again to retry.`
+                );
+            } catch (fallbackError) {
+                logger.error('Failed to notify user of error', fallbackError);
+            }
         }
     }
+}
+
+/**
+ * Handle postback events (retry button, etc.)
+ */
+async function handlePostbackEvent(event, userId) {
+    const data = event.postback?.data || '';
+    logger.info('Postback received', { userId, data });
+    
+    if (data === 'retry_ocr') {
+        // Check if we have cached image for this user
+        const cachedData = retryCache.get(userId);
+        
+        if (!cachedData) {
+            await lineService.replyText(
+                event.replyToken,
+                '⚠️ ไม่พบรูปภาพที่บันทึกไว้\n\n📷 กรุณาส่งรูปใบเสร็จใหม่อีกครั้ง'
+            );
+            return;
+        }
+        
+        // Process the cached image
+        await lineService.replyText(event.replyToken, '🔄 กำลังลองใหม่...');
+        
+        try {
+            await processOCRWithBuffer(userId, cachedData.imageBuffer, cachedData.messageId);
+        } catch (error) {
+            logger.error('Retry failed', { userId, error: error.message });
+            await lineService.pushText(
+                userId,
+                `❌ การลองใหม่ล้มเหลว\n\nError: ${error.message}\n\n📷 กรุณาส่งรูปใบเสร็จใหม่`
+            );
+        }
+    }
+}
+
+/**
+ * Process OCR with provided image buffer (used for retry)
+ */
+async function processOCRWithBuffer(userId, imageBuffer, messageId) {
+    const timestamp = formatDateTime();
+    const isDebugMode = process.env.VERBOSE_DEBUG_MODE === 'true';
+    const isReturnOutput = process.env.VERBOSE_RETURN_OUTPUT === 'true';
+    
+    // Get user profile
+    const userInfo = await lineService.getUserProfile(userId);
+    
+    // Process with Gemini AI
+    if (isDebugMode) {
+        await lineService.pushText(userId, '🔍 Processing with Gemini AI...');
+    }
+    const ocrData = await geminiService.parseInvoice(imageBuffer, 'image/jpeg');
+    
+    // Increment usage
+    await usageService.incrementUsage();
+    
+    // Upload to Google Drive
+    if (isDebugMode) {
+        await lineService.pushText(userId, '📁 Uploading to Google Drive...');
+    }
+    const fileName = `receipt_${messageId}_retry_${Date.now()}.jpg`;
+    const uploadResult = await driveService.uploadImage(imageBuffer, fileName, 'image/jpeg');
+    
+    // Save to Sheets
+    if (isDebugMode) {
+        await lineService.pushText(userId, '📊 Saving to Google Sheets...');
+    }
+    const rows = geminiService.formatForSheets(ocrData, uploadResult.url, timestamp, userInfo);
+    await sheetsService.appendRows(rows);
+    
+    // Send success message
+    if (isReturnOutput) {
+        const successMessage = formatSuccessMessage(ocrData, uploadResult.url);
+        await lineService.pushText(userId, successMessage);
+    } else {
+        await lineService.pushText(userId, '✅ Invoice processed and saved!');
+    }
+    
+    // Clear retry cache
+    retryCache.delete(userId);
+    
+    logger.info('Retry OCR successful', { userId, messageId });
 }
 
 
