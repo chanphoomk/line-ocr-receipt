@@ -130,6 +130,7 @@ async function handleEvent(event) {
 
 /**
  * Process document (image or PDF)
+ * Optimized: Uses Reply for result, Push only as fallback (saves message quota)
  * @param {Object} event - LINE webhook event
  * @param {string} userId - User ID
  * @param {string} docType - 'image' or 'pdf'
@@ -138,6 +139,7 @@ async function processDocument(event, userId, docType) {
     const messageId = event.message.id;
     const fileName = event.message.fileName || '';
     const timestamp = formatDateTime();
+    const replyToken = event.replyToken;  // Save for later use
     let fileBuffer = null;
 
     try {
@@ -151,7 +153,7 @@ async function processDocument(event, userId, docType) {
             });
 
             await lineService.replyText(
-                event.replyToken,
+                replyToken,
                 `⚠️ ${availability.message}`
             );
             return;
@@ -161,12 +163,12 @@ async function processDocument(event, userId, docType) {
         const isDebugMode = process.env.VERBOSE_DEBUG_MODE === 'true';
         const isReturnOutput = process.env.VERBOSE_RETURN_OUTPUT === 'true';
 
-        // Step 1: Send processing notification
+        // NOTE: We don't send "processing" message anymore to save replyToken for result
+        // Only send processing notification in debug mode via push
         const docLabel = docType === 'pdf' ? 'PDF' : 'image';
-        const processingMsg = isDebugMode 
-            ? `🔄 Processing your ${docLabel}...\n📊 Quota: ${availability.count + 1}/${availability.limit}`
-            : `🔄 Processing your ${docLabel}...`;
-        await lineService.replyText(event.replyToken, processingMsg);
+        if (isDebugMode) {
+            await lineService.pushText(userId, `🔄 Processing your ${docLabel}...`);
+        }
 
         // Step 1.5: Get user profile for logging
         logger.info('Getting user profile...');
@@ -215,13 +217,20 @@ async function processDocument(event, userId, docType) {
         const rows = geminiService.formatForSheets(ocrData, uploadResult.url, timestamp, userInfo);
         await sheetsService.appendRows(rows);
 
-        // Step 6: Send success message with extracted data (only if RETURN_OUTPUT is true)
-        if (isReturnOutput) {
-            const successMessage = formatSuccessMessage(ocrData, uploadResult.url);
+        // Step 6: Send success message - Try Reply first (FREE), fallback to Push
+        const successMessage = isReturnOutput 
+            ? formatSuccessMessage(ocrData, uploadResult.url)
+            : '✅ Invoice processed and saved!';
+        
+        // Try Reply first (saves push quota)
+        try {
+            await lineService.replyText(replyToken, successMessage);
+            logger.info('Success message sent via REPLY (free)');
+        } catch (replyError) {
+            // Reply token expired (>30s), fallback to Push
+            logger.warn('Reply token expired, using Push fallback');
             await lineService.pushText(userId, successMessage);
-        } else {
-            // Minimal confirmation
-            await lineService.pushText(userId, '✅ Invoice processed and saved!');
+            logger.info('Success message sent via PUSH (uses quota)');
         }
 
         logger.info('Document processed successfully', {
