@@ -445,36 +445,63 @@ function getInvoiceMonth(invoiceDate) {
     return '';
 }
 
+// Receipt ID counter (resets on server restart, increments per request)
+let receiptCounter = 0;
+let lastReceiptDate = '';
+
+/**
+ * Generate unique Receipt ID
+ * Format: RYYMMDD-NNN (e.g., R250117-001)
+ */
+function generateReceiptId() {
+    const now = new Date();
+    const dateStr = now.toISOString().slice(2, 10).replace(/-/g, ''); // YYMMDD
+    
+    // Reset counter if new day
+    if (dateStr !== lastReceiptDate) {
+        receiptCounter = 0;
+        lastReceiptDate = dateStr;
+    }
+    
+    receiptCounter++;
+    const seq = String(receiptCounter).padStart(3, '0');
+    return `R${dateStr}-${seq}`;
+}
+
 /**
  * Format parsed invoice data for Google Sheets
- * 22-column layout: A-V (added Invoice Month and Token Used)
+ * 23-column layout: A-W (added Receipt ID after Processed At)
  */
 function formatForSheets(data, imageUrl, timestamp, userInfo = {}) {
+    // Generate unique Receipt ID
+    const receiptId = generateReceiptId();
+    
     // Get invoice month YYYYMM
     const invoiceMonth = getInvoiceMonth(data.invoiceDate);
     
-    // Header data (columns A-H)
+    // Header data (columns A-I)
     const headerData = [
         timestamp,                          // A: Processed At
-        data.invoiceDate || '',             // B: Invoice Date
-        invoiceMonth,                       // C: Invoice Month (YYYYMM) - NEW
-        data.invoiceNumber || '',           // D: Invoice Number
-        data.documentType || 'Receipt',     // E: Document Type
-        data.sellerName || '',              // F: Seller Name
-        data.sellerTaxId || '',             // G: Seller Tax ID
-        data.expenseCategory || 'Other',    // H: Expense Category
+        receiptId,                          // B: Receipt ID - NEW
+        data.invoiceDate || '',             // C: Invoice Date
+        invoiceMonth,                       // D: Invoice Month (YYYYMM)
+        data.invoiceNumber || '',           // E: Invoice Number
+        data.documentType || 'Receipt',     // F: Document Type
+        data.sellerName || '',              // G: Seller Name
+        data.sellerTaxId || '',             // H: Seller Tax ID
+        data.expenseCategory || 'Other',    // I: Expense Category
     ];
 
-    // Totals data (columns O-V)
+    // Totals data (columns P-W)
     const totalsData = [
-        data.subtotal || '',                // O: Subtotal
-        data.vatAmount || '',               // P: VAT 7%
-        data.grandTotal || '',              // Q: Grand Total
-        imageUrl || '',                     // R: Image URL
-        data.confidence?.toFixed(2) || '',  // S: Confidence
-        data.tokenUsed || '',               // T: Token Used - NEW
-        userInfo.userId || '',              // U: User ID
-        userInfo.displayName || '',         // V: User Name
+        data.subtotal || '',                // P: Subtotal
+        data.vatAmount || '',               // Q: VAT 7%
+        data.grandTotal || '',              // R: Grand Total
+        imageUrl || '',                     // S: Image URL
+        data.confidence?.toFixed(2) || '',  // T: Confidence
+        data.tokenUsed || '',               // U: Token Used
+        userInfo.userId || '',              // V: User ID
+        userInfo.displayName || '',         // W: User Name
     ];
 
     const rows = [];
@@ -482,24 +509,24 @@ function formatForSheets(data, imageUrl, timestamp, userInfo = {}) {
     if (data.lineItems.length === 0) {
         rows.push([
             ...headerData,
-            '',                             // I: Item #
-            '',                             // J: Line Type
-            '',                             // K: Description
-            '',                             // L: Quantity
-            '',                             // M: Unit Price
-            '',                             // N: Amount
+            '',                             // J: Item #
+            '',                             // K: Line Type
+            '',                             // L: Description
+            '',                             // M: Quantity
+            '',                             // N: Unit Price
+            '',                             // O: Amount
             ...totalsData,
         ]);
     } else {
         data.lineItems.forEach(item => {
             rows.push([
                 ...headerData,
-                String(item.itemNumber),    // I: Item #
-                item.lineType || 'item',    // J: Line Type
-                item.description || '',     // K: Description
-                item.quantity || 1,         // L: Quantity
-                item.unitPrice || '',       // M: Unit Price
-                item.amount || '',          // N: Amount
+                String(item.itemNumber),    // J: Item #
+                item.lineType || 'item',    // K: Line Type
+                item.description || '',     // L: Description
+                item.quantity || 1,         // M: Quantity
+                item.unitPrice || '',       // N: Unit Price
+                item.amount || '',          // O: Amount
                 ...totalsData,
             ]);
         });
@@ -509,32 +536,33 @@ function formatForSheets(data, imageUrl, timestamp, userInfo = {}) {
 }
 
 /**
- * Get sheet headers (22 columns: A-V)
+ * Get sheet headers (23 columns: A-W)
  */
 function getSheetHeaders() {
     return [
         'Processed At',      // A
-        'Invoice Date',      // B
-        'Invoice Month',     // C - NEW (YYYYMM)
-        'Invoice Number',    // D
-        'Document Type',     // E
-        'Seller Name',       // F
-        'Seller Tax ID',     // G
-        'Expense Category',  // H
-        'Item #',            // I
-        'Line Type',         // J
-        'Description',       // K
-        'Quantity',          // L
-        'Unit Price',        // M
-        'Amount',            // N
-        'Subtotal',          // O
-        'VAT 7%',            // P
-        'Grand Total',       // Q
-        'Image URL',         // R
-        'Confidence',        // S
-        'Token Used',        // T - NEW
-        'User ID',           // U
-        'User Name',         // V
+        'Receipt ID',        // B - NEW
+        'Invoice Date',      // C
+        'Invoice Month',     // D (YYYYMM)
+        'Invoice Number',    // E
+        'Document Type',     // F
+        'Seller Name',       // G
+        'Seller Tax ID',     // H
+        'Expense Category',  // I
+        'Item #',            // J
+        'Line Type',         // K
+        'Description',       // L
+        'Quantity',          // M
+        'Unit Price',        // N
+        'Amount',            // O
+        'Subtotal',          // P
+        'VAT 7%',            // Q
+        'Grand Total',       // R
+        'Image URL',         // S
+        'Confidence',        // T
+        'Token Used',        // U
+        'User ID',           // V
+        'User Name',         // W
     ];
 }
 
