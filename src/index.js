@@ -105,14 +105,40 @@ async function handleEvent(event) {
         return;
     }
 
-    // Only process image messages
-    if (event.type !== 'message' || event.message?.type !== 'image') {
+    // Handle image messages
+    if (event.type === 'message' && event.message?.type === 'image') {
+        await processDocument(event, userId, 'image');
         return;
     }
 
-    // Process image
+    // Handle file messages (PDF support)
+    if (event.type === 'message' && event.message?.type === 'file') {
+        const fileName = event.message.fileName || '';
+        const isPdf = fileName.toLowerCase().endsWith('.pdf');
+        
+        if (isPdf) {
+            await processDocument(event, userId, 'pdf');
+        } else {
+            await lineService.replyText(
+                event.replyToken,
+                `⚠️ ไฟล์ ${fileName} ไม่รองรับ\n\n✅ รองรับ: รูปภาพ (JPG, PNG) หรือไฟล์ PDF`
+            );
+        }
+        return;
+    }
+}
+
+/**
+ * Process document (image or PDF)
+ * @param {Object} event - LINE webhook event
+ * @param {string} userId - User ID
+ * @param {string} docType - 'image' or 'pdf'
+ */
+async function processDocument(event, userId, docType) {
     const messageId = event.message.id;
+    const fileName = event.message.fileName || '';
     const timestamp = formatDateTime();
+    let fileBuffer = null;
 
     try {
         // Step 0: Check OCR availability (global quota limit)
@@ -136,28 +162,32 @@ async function handleEvent(event) {
         const isReturnOutput = process.env.VERBOSE_RETURN_OUTPUT === 'true';
 
         // Step 1: Send processing notification
+        const docLabel = docType === 'pdf' ? 'PDF' : 'image';
         const processingMsg = isDebugMode 
-            ? `🔄 Processing your receipt image...\n📊 Quota: ${availability.count + 1}/${availability.limit}`
-            : '🔄 Processing your receipt image...';
+            ? `🔄 Processing your ${docLabel}...\n📊 Quota: ${availability.count + 1}/${availability.limit}`
+            : `🔄 Processing your ${docLabel}...`;
         await lineService.replyText(event.replyToken, processingMsg);
 
         // Step 1.5: Get user profile for logging
         logger.info('Getting user profile...');
         const userInfo = await lineService.getUserProfile(userId);
 
-        // Step 2: Download image from LINE
+        // Step 2: Download file from LINE
         if (isDebugMode) {
-            await lineService.pushText(userId, '📥 Step 1/4: Downloading image...');
+            await lineService.pushText(userId, `📥 Step 1/4: Downloading ${docLabel}...`);
         }
-        logger.info(`Downloading image: ${messageId}`);
-        const imageBuffer = await lineService.downloadImage(messageId);
+        logger.info(`Downloading ${docType}: ${messageId}`);
+        fileBuffer = await lineService.downloadImage(messageId);  // Same API for both
+
+        // Determine MIME type
+        const mimeType = docType === 'pdf' ? 'application/pdf' : 'image/jpeg';
 
         // Step 3: Process with Gemini AI (Vision)
         if (isDebugMode) {
             await lineService.pushText(userId, '🔍 Step 2/4: Processing with Gemini AI...');
         }
-        logger.info('Processing with Gemini AI...');
-        const ocrData = await geminiService.parseInvoice(imageBuffer, 'image/jpeg');
+        logger.info(`Processing ${docType} with Gemini AI...`);
+        const ocrData = await geminiService.parseInvoice(fileBuffer, mimeType);
 
         // Step 3.5: Increment usage counter AFTER successful OCR
         await usageService.incrementUsage();
@@ -167,11 +197,14 @@ async function handleEvent(event) {
             await lineService.pushText(userId, '📁 Step 3/4: Uploading to Google Drive...');
         }
         logger.info('Uploading to Google Drive...');
-        const fileName = `receipt_${messageId}_${Date.now()}.jpg`;
+        const ext = docType === 'pdf' ? 'pdf' : 'jpg';
+        const uploadFileName = docType === 'pdf' && fileName 
+            ? fileName 
+            : `receipt_${messageId}_${Date.now()}.${ext}`;
         const uploadResult = await driveService.uploadImage(
-            imageBuffer,
-            fileName,
-            'image/jpeg'
+            fileBuffer,
+            uploadFileName,
+            mimeType
         );
 
         // Step 5: Append to Google Sheets
@@ -191,8 +224,9 @@ async function handleEvent(event) {
             await lineService.pushText(userId, '✅ Invoice processed and saved!');
         }
 
-        logger.info('Invoice processed successfully', {
+        logger.info('Document processed successfully', {
             messageId,
+            docType,
             invoiceNumber: ocrData.invoiceNumber,
             seller: ocrData.sellerName,
             total: ocrData.grandTotal,
@@ -204,20 +238,23 @@ async function handleEvent(event) {
         retryCache.delete(userId);
 
     } catch (error) {
-        logger.error('Failed to process receipt', {
+        logger.error('Failed to process document', {
             messageId,
+            docType,
             error: error.message,
             stack: error.stack,
         });
 
-        // Cache the image for retry (only if we have the buffer)
-        if (imageBuffer) {
+        // Cache the file for retry (only if we have the buffer)
+        if (fileBuffer) {
             retryCache.set(userId, {
-                imageBuffer,
+                fileBuffer,
                 messageId,
+                docType,
+                mimeType: docType === 'pdf' ? 'application/pdf' : 'image/jpeg',
                 timestamp: Date.now(),
             });
-            logger.info('Cached image for retry', { userId, messageId });
+            logger.info('Cached document for retry', { userId, messageId, docType });
         }
 
         // Notify user of error with retry button
@@ -271,25 +308,28 @@ async function handlePostbackEvent(event, userId) {
             return;
         }
         
-        // Process the cached image
+        // Process the cached document
         await lineService.replyText(event.replyToken, '🔄 กำลังลองใหม่...');
         
         try {
-            await processOCRWithBuffer(userId, cachedData.imageBuffer, cachedData.messageId);
+            await processWithCachedBuffer(userId, cachedData);
         } catch (error) {
             logger.error('Retry failed', { userId, error: error.message });
             await lineService.pushText(
                 userId,
-                `❌ การลองใหม่ล้มเหลว\n\nError: ${error.message}\n\n📷 กรุณาส่งรูปใบเสร็จใหม่`
+                `❌ การลองใหม่ล้มเหลว\n\nError: ${error.message}\n\n📷 กรุณาส่งไฟล์ใหม่`
             );
         }
     }
 }
 
 /**
- * Process OCR with provided image buffer (used for retry)
+ * Process document with cached buffer (used for retry)
+ * @param {string} userId - User ID
+ * @param {Object} cachedData - Cached data from retry cache
  */
-async function processOCRWithBuffer(userId, imageBuffer, messageId) {
+async function processWithCachedBuffer(userId, cachedData) {
+    const { fileBuffer, messageId, docType, mimeType } = cachedData;
     const timestamp = formatDateTime();
     const isDebugMode = process.env.VERBOSE_DEBUG_MODE === 'true';
     const isReturnOutput = process.env.VERBOSE_RETURN_OUTPUT === 'true';
@@ -301,7 +341,7 @@ async function processOCRWithBuffer(userId, imageBuffer, messageId) {
     if (isDebugMode) {
         await lineService.pushText(userId, '🔍 Processing with Gemini AI...');
     }
-    const ocrData = await geminiService.parseInvoice(imageBuffer, 'image/jpeg');
+    const ocrData = await geminiService.parseInvoice(fileBuffer, mimeType);
     
     // Increment usage
     await usageService.incrementUsage();
@@ -310,8 +350,9 @@ async function processOCRWithBuffer(userId, imageBuffer, messageId) {
     if (isDebugMode) {
         await lineService.pushText(userId, '📁 Uploading to Google Drive...');
     }
-    const fileName = `receipt_${messageId}_retry_${Date.now()}.jpg`;
-    const uploadResult = await driveService.uploadImage(imageBuffer, fileName, 'image/jpeg');
+    const ext = docType === 'pdf' ? 'pdf' : 'jpg';
+    const fileName = `receipt_${messageId}_retry_${Date.now()}.${ext}`;
+    const uploadResult = await driveService.uploadImage(fileBuffer, fileName, mimeType);
     
     // Save to Sheets
     if (isDebugMode) {
@@ -331,7 +372,7 @@ async function processOCRWithBuffer(userId, imageBuffer, messageId) {
     // Clear retry cache
     retryCache.delete(userId);
     
-    logger.info('Retry OCR successful', { userId, messageId });
+    logger.info('Retry successful', { userId, messageId, docType });
 }
 
 
