@@ -470,7 +470,7 @@ function generateReceiptId() {
 
 /**
  * Format parsed invoice data for Google Sheets
- * 23-column layout: A-W (added Receipt ID after Processed At)
+ * 24-column layout: A-X (added Additional VAT 7% and Total Inv VAT 7%)
  */
 function formatForSheets(data, imageUrl, timestamp, userInfo = {}) {
     // Generate unique Receipt ID
@@ -479,10 +479,13 @@ function formatForSheets(data, imageUrl, timestamp, userInfo = {}) {
     // Get invoice month YYYYMM
     const invoiceMonth = getInvoiceMonth(data.invoiceDate);
     
+    // Check if VAT is present on the receipt
+    const hasVat = data.vatAmount && parseFloat(data.vatAmount) > 0;
+    
     // Header data (columns A-I)
     const headerData = [
         timestamp,                          // A: Processed At
-        receiptId,                          // B: Receipt ID - NEW
+        receiptId,                          // B: Receipt ID
         data.invoiceDate || '',             // C: Invoice Date
         invoiceMonth,                       // D: Invoice Month (YYYYMM)
         data.invoiceNumber || '',           // E: Invoice Number
@@ -492,21 +495,27 @@ function formatForSheets(data, imageUrl, timestamp, userInfo = {}) {
         data.expenseCategory || 'Other',    // I: Expense Category
     ];
 
-    // Totals data (columns P-W)
-    const totalsData = [
-        data.subtotal || '',                // P: Subtotal
-        data.vatAmount || '',               // Q: VAT 7%
-        data.grandTotal || '',              // R: Grand Total
-        imageUrl || '',                     // S: Image URL
-        data.confidence?.toFixed(2) || '',  // T: Confidence
-        data.tokenUsed || '',               // U: Token Used
-        userInfo.userId || '',              // V: User ID
-        userInfo.displayName || '',         // W: User Name
+    // Totals data (columns Q-X) - VAT columns will be inserted per line
+    const buildTotalsData = (additionalVat) => [
+        additionalVat,                       // Q: Additional VAT 7% (calculated)
+        hasVat ? data.vatAmount : '',        // R: Total Inv VAT 7% (from receipt)
+        data.grandTotal || '',               // S: Grand Total
+        imageUrl || '',                      // T: Image URL
+        data.confidence?.toFixed(2) || '',   // U: Confidence
+        data.tokenUsed || '',                // V: Token Used
+        userInfo.userId || '',               // W: User ID
+        userInfo.displayName || '',          // X: User Name
     ];
 
     const rows = [];
 
     if (data.lineItems.length === 0) {
+        // No line items - calculate VAT from subtotal if available
+        const subtotal = parseFloat(data.subtotal) || 0;
+        const additionalVat = hasVat && subtotal > 0 
+            ? (subtotal * 0.07).toFixed(2) 
+            : '';
+        
         rows.push([
             ...headerData,
             '',                             // J: Item #
@@ -515,10 +524,17 @@ function formatForSheets(data, imageUrl, timestamp, userInfo = {}) {
             '',                             // M: Quantity
             '',                             // N: Unit Price
             '',                             // O: Amount
-            ...totalsData,
+            data.subtotal || '',            // P: Subtotal
+            ...buildTotalsData(additionalVat),
         ]);
     } else {
         data.lineItems.forEach(item => {
+            // Calculate Additional VAT 7% per line item
+            const amount = parseFloat(item.amount) || 0;
+            const additionalVat = hasVat && amount > 0 
+                ? (amount * 0.07).toFixed(2) 
+                : '';
+            
             rows.push([
                 ...headerData,
                 String(item.itemNumber),    // J: Item #
@@ -527,7 +543,8 @@ function formatForSheets(data, imageUrl, timestamp, userInfo = {}) {
                 item.quantity || 1,         // M: Quantity
                 item.unitPrice || '',       // N: Unit Price
                 item.amount || '',          // O: Amount
-                ...totalsData,
+                data.subtotal || '',        // P: Subtotal
+                ...buildTotalsData(additionalVat),
             ]);
         });
     }
@@ -536,33 +553,34 @@ function formatForSheets(data, imageUrl, timestamp, userInfo = {}) {
 }
 
 /**
- * Get sheet headers (23 columns: A-W)
+ * Get sheet headers (24 columns: A-X)
  */
 function getSheetHeaders() {
     return [
-        'Processed At',      // A
-        'Receipt ID',        // B - NEW
-        'Invoice Date',      // C
-        'Invoice Month',     // D (YYYYMM)
-        'Invoice Number',    // E
-        'Document Type',     // F
-        'Seller Name',       // G
-        'Seller Tax ID',     // H
-        'Expense Category',  // I
-        'Item #',            // J
-        'Line Type',         // K
-        'Description',       // L
-        'Quantity',          // M
-        'Unit Price',        // N
-        'Amount',            // O
-        'Subtotal',          // P
-        'VAT 7%',            // Q
-        'Grand Total',       // R
-        'Image URL',         // S
-        'Confidence',        // T
-        'Token Used',        // U
-        'User ID',           // V
-        'User Name',         // W
+        'Processed At',         // A
+        'Receipt ID',           // B
+        'Invoice Date',         // C
+        'Invoice Month',        // D (YYYYMM)
+        'Invoice Number',       // E
+        'Document Type',        // F
+        'Seller Name',          // G
+        'Seller Tax ID',        // H
+        'Expense Category',     // I
+        'Item #',               // J
+        'Line Type',            // K
+        'Description',          // L
+        'Quantity',             // M
+        'Unit Price',           // N
+        'Amount',               // O
+        'Subtotal',             // P
+        'Additional VAT 7%',    // Q (calculated: Amount × 0.07)
+        'Total Inv VAT 7%',     // R (from receipt)
+        'Grand Total',          // S
+        'Image URL',            // T
+        'Confidence',           // U
+        'Token Used',           // V
+        'User ID',              // W
+        'User Name',            // X
     ];
 }
 
